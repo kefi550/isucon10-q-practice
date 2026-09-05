@@ -39,6 +39,12 @@ type InitializeResponse struct {
 	Language string `json:"language"`
 }
 
+type discardLogWriter struct{}
+
+func (discardLogWriter) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+
 type Chair struct {
 	ID          int64  `db:"id" json:"id"`
 	Name        string `db:"name" json:"name"`
@@ -243,14 +249,12 @@ func configureDBPool(db *sqlx.DB) {
 func init() {
 	jsonText, err := ioutil.ReadFile("../fixture/chair_condition.json")
 	if err != nil {
-		fmt.Printf("%v\n", err)
 		os.Exit(1)
 	}
 	json.Unmarshal(jsonText, &chairSearchCondition)
 
 	jsonText, err = ioutil.ReadFile("../fixture/estate_condition.json")
 	if err != nil {
-		fmt.Printf("%v\n", err)
 		os.Exit(1)
 	}
 	json.Unmarshal(jsonText, &estateSearchCondition)
@@ -259,11 +263,13 @@ func init() {
 func main() {
 	// Echo instance
 	e := echo.New()
-	e.Debug = true
-	e.Logger.SetLevel(log.DEBUG)
+	e.Debug = false
+	e.HideBanner = true
+	e.HidePort = true
+	e.Logger.SetOutput(discardLogWriter{})
+	e.Logger.SetLevel(log.OFF)
 
 	// Middleware
-	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 
 	// Initialize
