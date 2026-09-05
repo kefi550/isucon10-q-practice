@@ -1,5 +1,9 @@
 # Repository Guidelines
 
+## Benchmark Rules
+
+Read [`rule.md`](rule.md) before changing or evaluating benchmark behavior. It documents the score calculation, penalties, disqualification conditions, and competition constraints.
+
 ## Project Structure & Module Organization
 
 - `webapp/go/` contains the Go 1.14 Echo application (`main.go`), module files, `Makefile`, and `Dockerfile`.
