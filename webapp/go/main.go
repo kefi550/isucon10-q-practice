@@ -1158,7 +1158,7 @@ func searchEstateNazotte(c echo.Context) error {
 	if queries := estatePreparedQueriesOrNil(); queries != nil {
 		err = queries.nazotteEstate.Select(&estates, b.BottomRightCorner.Latitude, b.TopLeftCorner.Latitude, b.BottomRightCorner.Longitude, b.TopLeftCorner.Longitude, polygonText, NazotteLimit)
 	} else {
-		query := "SELECT " + estatePublicColumns + " FROM estate WHERE latitude <= ? AND latitude >= ? AND longitude <= ? AND longitude >= ? AND ST_Contains(ST_PolygonFromText(?), Point(latitude, longitude)) ORDER BY popularity_desc ASC, id ASC LIMIT ?"
+		query := "SELECT " + estatePublicColumns + " FROM estate FORCE INDEX (idx_estate_latitude_longitude) WHERE latitude <= ? AND latitude >= ? AND longitude <= ? AND longitude >= ? AND ST_Contains(ST_PolygonFromText(?), Point(latitude, longitude)) ORDER BY popularity_desc ASC, id ASC LIMIT ?"
 		err = estateDB.Select(&estates, query, b.BottomRightCorner.Latitude, b.TopLeftCorner.Latitude, b.BottomRightCorner.Longitude, b.TopLeftCorner.Longitude, polygonText, NazotteLimit)
 	}
 	if err == sql.ErrNoRows {
