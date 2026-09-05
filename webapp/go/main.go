@@ -615,14 +615,10 @@ func searchChairs(c echo.Context) error {
 		hasConfiguredFeatureQuery(featureQuery, chairSearchCondition.Feature.List) &&
 		ensureChairFeatureIndex()
 	if featureQuery != "" {
-		for _, f := range strings.Split(featureQuery, ",") {
-			if useChairFeatureIndex && isConfiguredFeature(f, chairSearchCondition.Feature.List) {
-				conditions = append(conditions, "EXISTS (SELECT 1 FROM chair_feature AS cf WHERE cf.chair_id = chair.id AND cf.feature_value = ?)")
-			} else {
-				conditions = append(conditions, "features LIKE CONCAT('%', ?, '%')")
-			}
-			params = append(params, f)
-		}
+		conditions, params = appendFeatureSearchConditions(
+			conditions, params, featureQuery, chairSearchCondition.Feature.List,
+			useChairFeatureIndex, "chair", chairFeatureTable, "chair_id",
+		)
 	}
 
 	if len(conditions) == 0 {
@@ -965,14 +961,10 @@ func searchEstates(c echo.Context) error {
 		hasConfiguredFeatureQuery(featureQuery, estateSearchCondition.Feature.List) &&
 		ensureEstateFeatureIndex()
 	if featureQuery != "" {
-		for _, f := range strings.Split(featureQuery, ",") {
-			if useEstateFeatureIndex && isConfiguredFeature(f, estateSearchCondition.Feature.List) {
-				conditions = append(conditions, "EXISTS (SELECT 1 FROM estate_feature AS ef WHERE ef.estate_id = estate.id AND ef.feature_value = ?)")
-			} else {
-				conditions = append(conditions, "features like concat('%', ?, '%')")
-			}
-			params = append(params, f)
-		}
+		conditions, params = appendFeatureSearchConditions(
+			conditions, params, featureQuery, estateSearchCondition.Feature.List,
+			useEstateFeatureIndex, "estate", estateFeatureTable, "estate_id",
+		)
 	}
 
 	if len(conditions) == 0 {

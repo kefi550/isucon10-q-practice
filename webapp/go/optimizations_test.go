@@ -5,6 +5,82 @@ import (
 	"testing"
 )
 
+func TestAppendFeatureSearchConditionsAggregatesConfiguredFeatures(t *testing.T) {
+	conditions, params := appendFeatureSearchConditions(
+		[]string{"price >= ?"},
+		[]interface{}{3000},
+		"mesh,modern,mesh",
+		[]string{"mesh", "modern"},
+		true,
+		"chair",
+		"chair_feature",
+		"chair_id",
+	)
+
+	wantConditions := []string{
+		"price >= ?",
+		"chair.id IN (SELECT feature_match.chair_id FROM chair_feature AS feature_match WHERE feature_match.feature_value IN (?,?) GROUP BY feature_match.chair_id HAVING COUNT(*) = ?)",
+	}
+	wantParams := []interface{}{3000, "mesh", "modern", 2}
+	if !reflect.DeepEqual(conditions, wantConditions) {
+		t.Fatalf("unexpected conditions: %#v", conditions)
+	}
+	if !reflect.DeepEqual(params, wantParams) {
+		t.Fatalf("unexpected params: %#v", params)
+	}
+}
+
+func TestAppendFeatureSearchConditionsPreservesLikeFallback(t *testing.T) {
+	conditions, params := appendFeatureSearchConditions(
+		nil,
+		nil,
+		"configured,unknown%,configured_",
+		[]string{"configured", "configured_"},
+		true,
+		"estate",
+		"estate_feature",
+		"estate_id",
+	)
+
+	wantConditions := []string{
+		"estate.features LIKE CONCAT('%', ?, '%')",
+		"estate.features LIKE CONCAT('%', ?, '%')",
+		"estate.id IN (SELECT feature_match.estate_id FROM estate_feature AS feature_match WHERE feature_match.feature_value IN (?) GROUP BY feature_match.estate_id HAVING COUNT(*) = ?)",
+	}
+	wantParams := []interface{}{"unknown%", "configured_", "configured", 1}
+	if !reflect.DeepEqual(conditions, wantConditions) {
+		t.Fatalf("unexpected conditions: %#v", conditions)
+	}
+	if !reflect.DeepEqual(params, wantParams) {
+		t.Fatalf("unexpected params: %#v", params)
+	}
+}
+
+func TestAppendFeatureSearchConditionsWithoutIndexUsesOriginalLikeMatching(t *testing.T) {
+	conditions, params := appendFeatureSearchConditions(
+		nil,
+		nil,
+		"mesh,modern",
+		[]string{"mesh", "modern"},
+		false,
+		"chair",
+		"chair_feature",
+		"chair_id",
+	)
+
+	wantConditions := []string{
+		"chair.features LIKE CONCAT('%', ?, '%')",
+		"chair.features LIKE CONCAT('%', ?, '%')",
+	}
+	wantParams := []interface{}{"mesh", "modern"}
+	if !reflect.DeepEqual(conditions, wantConditions) {
+		t.Fatalf("unexpected conditions: %#v", conditions)
+	}
+	if !reflect.DeepEqual(params, wantParams) {
+		t.Fatalf("unexpected params: %#v", params)
+	}
+}
+
 func TestCloneResponsePreservesEmptyJSONArrays(t *testing.T) {
 	chairResponse := cloneChairSearchResponse(ChairSearchResponse{Chairs: []Chair{}})
 	if chairResponse.Chairs == nil || !reflect.DeepEqual(chairResponse.Chairs, []Chair{}) {

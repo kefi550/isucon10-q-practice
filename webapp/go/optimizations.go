@@ -734,6 +734,50 @@ func hasConfiguredFeatureQuery(query string, configured []string) bool {
 	return false
 }
 
+// appendFeatureSearchConditions preserves the original substring matching for
+// unknown or wildcard-bearing values. Configured values are normalized in the
+// feature table, so intersect them in one materialized subquery instead of
+// running one correlated EXISTS subquery for every base-table row and feature.
+func appendFeatureSearchConditions(
+	conditions []string,
+	params []interface{},
+	query string,
+	configured []string,
+	useIndex bool,
+	baseAlias string,
+	indexTable string,
+	idColumn string,
+) ([]string, []interface{}) {
+	indexedFeatures := make([]string, 0)
+	seenIndexedFeatures := make(map[string]struct{})
+	for _, feature := range strings.Split(query, ",") {
+		if useIndex && isConfiguredFeature(feature, configured) {
+			if _, exists := seenIndexedFeatures[feature]; !exists {
+				seenIndexedFeatures[feature] = struct{}{}
+				indexedFeatures = append(indexedFeatures, feature)
+			}
+			continue
+		}
+		conditions = append(conditions, baseAlias+".features LIKE CONCAT('%', ?, '%')")
+		params = append(params, feature)
+	}
+
+	if len(indexedFeatures) == 0 {
+		return conditions, params
+	}
+	placeholders := make([]string, len(indexedFeatures))
+	for i, feature := range indexedFeatures {
+		placeholders[i] = "?"
+		params = append(params, feature)
+	}
+	params = append(params, len(indexedFeatures))
+	conditions = append(conditions, fmt.Sprintf(
+		"%s.id IN (SELECT feature_match.%s FROM %s AS feature_match WHERE feature_match.feature_value IN (%s) GROUP BY feature_match.%s HAVING COUNT(*) = ?)",
+		baseAlias, idColumn, indexTable, strings.Join(placeholders, ","), idColumn,
+	))
+	return conditions, params
+}
+
 func ensureFeatureIndex(kind string) bool {
 	featureIndexes.mu.Lock()
 	defer featureIndexes.mu.Unlock()
