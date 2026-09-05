@@ -615,6 +615,9 @@ func searchChairs(c echo.Context) error {
 		hasConfiguredFeatureQuery(featureQuery, chairSearchCondition.Feature.List) &&
 		ensureChairFeatureIndex()
 	if featureQuery != "" {
+		// 複数 feature の絞り込みを、chair_feature 側を起点にした単一の非相関サブクエリ
+		// (IN + GROUP BY ... HAVING COUNT(*) = ?) にまとめる。相関 EXISTS を chair 側の
+		// 行ごとに評価するより大幅に速く、SELECT/COUNT どちらにもそのまま使える。
 		conditions, params = appendFeatureSearchConditions(
 			conditions, params, featureQuery, chairSearchCondition.Feature.List,
 			useChairFeatureIndex, "chair", chairFeatureTable, "chair_id",
@@ -641,9 +644,11 @@ func searchChairs(c echo.Context) error {
 	}
 
 	searchQuery := "SELECT " + chairPublicColumns + " FROM chair AS chair WHERE "
-	countQuery := "SELECT COUNT(*) FROM chair AS chair WHERE "
 	searchCondition := strings.Join(conditions, " AND ")
 	limitOffset := " ORDER BY popularity_desc ASC, id ASC LIMIT ? OFFSET ?"
+	countQueryText := "SELECT COUNT(*) FROM chair AS chair WHERE " + searchCondition
+	countQueryParams := params
+
 	cacheKey := c.Request().URL.Query().Encode()
 	countValues := c.Request().URL.Query()
 	countValues.Del("page")
@@ -663,7 +668,7 @@ func searchChairs(c echo.Context) error {
 				return cachedCount, nil
 			}
 			var loadedCount int64
-			if loadErr := chairDB.Get(&loadedCount, countQuery+searchCondition, params...); loadErr != nil {
+			if loadErr := chairDB.Get(&loadedCount, countQueryText, countQueryParams...); loadErr != nil {
 				return 0, loadErr
 			}
 			searchCache.putChairCount(countCacheKey, loadedCount, cacheGeneration)
@@ -961,6 +966,9 @@ func searchEstates(c echo.Context) error {
 		hasConfiguredFeatureQuery(featureQuery, estateSearchCondition.Feature.List) &&
 		ensureEstateFeatureIndex()
 	if featureQuery != "" {
+		// 複数 feature の絞り込みを、estate_feature 側を起点にした単一の非相関サブクエリ
+		// (IN + GROUP BY ... HAVING COUNT(*) = ?) にまとめる。相関 EXISTS を estate 側の
+		// 行ごとに評価するより大幅に速く、SELECT/COUNT どちらにもそのまま使える。
 		conditions, params = appendFeatureSearchConditions(
 			conditions, params, featureQuery, estateSearchCondition.Feature.List,
 			useEstateFeatureIndex, "estate", estateFeatureTable, "estate_id",
@@ -985,9 +993,11 @@ func searchEstates(c echo.Context) error {
 	}
 
 	searchQuery := "SELECT " + estatePublicColumns + " FROM estate AS estate WHERE "
-	countQuery := "SELECT COUNT(*) FROM estate AS estate WHERE "
 	searchCondition := strings.Join(conditions, " AND ")
 	limitOffset := " ORDER BY popularity_desc ASC, id ASC LIMIT ? OFFSET ?"
+	countQueryText := "SELECT COUNT(*) FROM estate AS estate WHERE " + searchCondition
+	countQueryParams := params
+
 	cacheKey := c.Request().URL.Query().Encode()
 	countValues := c.Request().URL.Query()
 	countValues.Del("page")
@@ -1007,7 +1017,7 @@ func searchEstates(c echo.Context) error {
 				return cachedCount, nil
 			}
 			var loadedCount int64
-			if loadErr := estateDB.Get(&loadedCount, countQuery+searchCondition, params...); loadErr != nil {
+			if loadErr := estateDB.Get(&loadedCount, countQueryText, countQueryParams...); loadErr != nil {
 				return 0, loadErr
 			}
 			searchCache.putEstateCount(countCacheKey, loadedCount, cacheGeneration)
