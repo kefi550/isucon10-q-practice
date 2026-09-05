@@ -20,8 +20,8 @@ for i in $(seq 1 1); do
   rsync -avr ${host}:/etc/systemd/system/isuumo.go.service "${LOCAL_PATH}/${host}/etc/systemd/system/"
   mkdir -p ${LOCAL_PATH}/${host}/etc/mysql/mysql.conf.d/
   rsync -avr ${host}:/etc/mysql/mysql.conf.d/ "${LOCAL_PATH}/${host}/etc/mysql/mysql.conf.d"
-  mkdir -p ${LOCAL_PATH}/${host}/etc/nginx/sites-enabled
-  rsync -avr ${host}:/etc/nginx/sites-enabled "${LOCAL_PATH}/${host}/etc/nginx/sites-enabled"
+  mkdir -p ${LOCAL_PATH}/${host}/etc/nginx/sites-available
+  rsync -avr ${host}:/etc/nginx/sites-available "${LOCAL_PATH}/${host}/etc/nginx/sites-available"
   mkdir -p ${LOCAL_PATH}/${host}/etc/logrotate.d/
   rsync -avr ${host}:/etc/logrotate.d/ "${LOCAL_PATH}/${host}/etc/logrotate.d/"
 done
