@@ -1,5 +1,9 @@
 # Repository Guidelines
 
+すべての変更は、振る舞いを変えないように、あくまでパフォーマンス改善を行ってください。
+ある変更は大きくすべてを変更せず、いくつかの段階に分けて小さく変更してください。
+git commit するまえに手動でベンチマークを行うので、すぐに変更をcommitせず、許可を求めてください。
+
 ## Benchmark Rules
 
 Read [`rule.md`](rule.md) before changing or evaluating benchmark behavior. It documents the score calculation, penalties, disqualification conditions, and competition constraints.
