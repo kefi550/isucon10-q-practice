@@ -17,6 +17,10 @@ CREATE TABLE isuumo.chair
     kind        VARCHAR(64)     NOT NULL,
     popularity  INTEGER         NOT NULL,
     stock       INTEGER         NOT NULL,
+    -- MySQL 5.7 cannot use an ascending (popularity, id) index for the mixed
+    -- ORDER BY popularity DESC, id ASC used by the API.  Store the negated
+    -- value so the same order can be scanned in one ascending index.
+    popularity_desc INTEGER GENERATED ALWAYS AS (-popularity) STORED,
     -- ORDER BY price ASC, id ASC (getLowPricedChair) をインデックスだけで解決する
     INDEX idx_price_id (price, id),
     -- price の範囲条件 + stock > 0 (searchChairs の SELECT/COUNT) の絞り込みに使う
@@ -24,9 +28,9 @@ CREATE TABLE isuumo.chair
     INDEX idx_chair_height (height),
     INDEX idx_chair_width (width),
     INDEX idx_chair_depth (depth),
-    INDEX idx_chair_color_popularity_id (color, popularity, id),
-    INDEX idx_chair_kind_popularity_id (kind, popularity, id),
-    INDEX idx_chair_popularity_id (popularity, id)
+    INDEX idx_chair_color_popularity_id (color, popularity_desc, id),
+    INDEX idx_chair_kind_popularity_id (kind, popularity_desc, id),
+    INDEX idx_chair_popularity_id (popularity_desc, id)
 );
 
 -- searchChairs の features 絞り込みを正規化テーブル経由で行うための索引テーブル。

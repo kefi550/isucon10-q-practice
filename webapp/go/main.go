@@ -24,6 +24,7 @@ import (
 
 const Limit = 20
 const NazotteLimit = 50
+const maxDBConnections = 10
 
 // estate と chair は互いに独立なテーブルなので、別々の MySQL インスタンスに分割できる。
 // estate は isu1 (アプリと同居)、chair は isu2 でホストする。
@@ -227,8 +228,16 @@ func getEnv(key, defaultValue string) string {
 
 // ConnectDB isuumoデータベースに接続する
 func (mc *MySQLConnectionEnv) ConnectDB() (*sqlx.DB, error) {
-	dsn := fmt.Sprintf("%v:%v@tcp(%v:%v)/%v", mc.User, mc.Password, mc.Host, mc.Port, mc.DBName)
+	// Dynamic search SQL cannot be prepared once because its predicates vary.
+	// Driver-side interpolation keeps values escaped and parameterized while
+	// avoiding a prepare/execute/close round trip, especially to remote chairDB.
+	dsn := fmt.Sprintf("%v:%v@tcp(%v:%v)/%v?interpolateParams=true", mc.User, mc.Password, mc.Host, mc.Port, mc.DBName)
 	return sqlx.Open("mysql", dsn)
+}
+
+func configureDBPool(db *sqlx.DB) {
+	db.SetMaxOpenConns(maxDBConnections)
+	db.SetMaxIdleConns(maxDBConnections)
 }
 
 func init() {
@@ -286,14 +295,14 @@ func main() {
 	if err != nil {
 		e.Logger.Fatalf("Estate DB connection failed : %v", err)
 	}
-	estateDB.SetMaxOpenConns(10)
+	configureDBPool(estateDB)
 	defer estateDB.Close()
 
 	chairDB, err = chairMySQLConnectionData.ConnectDB()
 	if err != nil {
 		e.Logger.Fatalf("Chair DB connection failed : %v", err)
 	}
-	chairDB.SetMaxOpenConns(10)
+	configureDBPool(chairDB)
 	defer chairDB.Close()
 
 	// Start server
@@ -303,6 +312,7 @@ func main() {
 
 func initialize(c echo.Context) error {
 	invalidateAllSearchCaches()
+	resetReadCache()
 	resetFeatureIndexState()
 	invalidateChairPreparedQueries()
 	invalidateEstatePreparedQueries()
@@ -335,6 +345,10 @@ func initialize(c echo.Context) error {
 		c.Logger().Errorf("failed to rebuild feature indexes: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	// Do this again after the database swap so a request that overlapped
+	// initialization cannot leave a result from the previous generation behind.
+	invalidateAllSearchCaches()
+	resetReadCache()
 
 	return c.JSON(http.StatusOK, InitializeResponse{
 		Language: "go",
@@ -368,6 +382,10 @@ func getChairDetail(c echo.Context) error {
 		c.Echo().Logger.Errorf("Request parameter \"id\" parse error : %v", err)
 		return c.NoContent(http.StatusBadRequest)
 	}
+	if chair, ok := getCachedChair(id); ok {
+		return c.JSON(http.StatusOK, chair)
+	}
+	cacheGeneration := currentChairReadGeneration()
 
 	chair := Chair{}
 	if queries := chairPreparedQueriesOrNil(); queries != nil {
@@ -386,6 +404,7 @@ func getChairDetail(c echo.Context) error {
 		c.Echo().Logger.Infof("requested id's chair is sold out : %v", id)
 		return c.NoContent(http.StatusNotFound)
 	}
+	rememberChair(chair, cacheGeneration)
 
 	return c.JSON(http.StatusOK, chair)
 }
@@ -505,6 +524,7 @@ func postChair(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	invalidateChairSearchCache()
+	invalidateChairReadCaches()
 	return c.NoContent(http.StatusCreated)
 }
 
@@ -627,33 +647,49 @@ func searchChairs(c echo.Context) error {
 	searchQuery := "SELECT " + chairPublicColumns + " FROM chair AS chair WHERE "
 	countQuery := "SELECT COUNT(*) FROM chair AS chair WHERE "
 	searchCondition := strings.Join(conditions, " AND ")
-	limitOffset := " ORDER BY popularity DESC, id ASC LIMIT ? OFFSET ?"
-	cacheKey := c.Request().URL.RawQuery
+	limitOffset := " ORDER BY popularity_desc ASC, id ASC LIMIT ? OFFSET ?"
+	cacheKey := c.Request().URL.Query().Encode()
+	countValues := c.Request().URL.Query()
+	countValues.Del("page")
+	countValues.Del("perPage")
+	countCacheKey := countValues.Encode()
 	cacheGeneration := searchCache.currentChairGeneration()
 	if cached, ok := searchCache.getChair(cacheKey); ok {
 		return c.JSON(http.StatusOK, cached)
 	}
 
-	var res ChairSearchResponse
-	err = chairDB.Get(&res.Count, countQuery+searchCondition, params...)
-	if err != nil {
-		c.Logger().Errorf("searchChairs DB execution error : %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-
-	chairs := []Chair{}
-	params = append(params, perPage, page*perPage)
-	err = chairDB.Select(&chairs, searchQuery+searchCondition+limitOffset, params...)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return c.JSON(http.StatusOK, ChairSearchResponse{Count: 0, Chairs: []Chair{}})
+	res, err := loadChairSearchOnce(cacheKey, cacheGeneration, func() (ChairSearchResponse, error) {
+		if cached, ok := searchCache.getChair(cacheKey); ok {
+			return cached, nil
 		}
+		count, countErr := loadChairCountOnce(countCacheKey, cacheGeneration, func() (int64, error) {
+			if cachedCount, ok := searchCache.getChairCount(countCacheKey); ok {
+				return cachedCount, nil
+			}
+			var loadedCount int64
+			if loadErr := chairDB.Get(&loadedCount, countQuery+searchCondition, params...); loadErr != nil {
+				return 0, loadErr
+			}
+			searchCache.putChairCount(countCacheKey, loadedCount, cacheGeneration)
+			return loadedCount, nil
+		})
+		if countErr != nil {
+			return ChairSearchResponse{}, countErr
+		}
+
+		chairs := []Chair{}
+		searchParams := append(append([]interface{}{}, params...), perPage, page*perPage)
+		if loadErr := chairDB.Select(&chairs, searchQuery+searchCondition+limitOffset, searchParams...); loadErr != nil {
+			return ChairSearchResponse{}, loadErr
+		}
+		loaded := ChairSearchResponse{Count: count, Chairs: chairs}
+		searchCache.putChair(cacheKey, loaded, cacheGeneration)
+		return loaded, nil
+	})
+	if err != nil {
 		c.Logger().Errorf("searchChairs DB execution error : %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-
-	res.Chairs = chairs
-	searchCache.putChair(cacheKey, res, cacheGeneration)
 
 	return c.JSON(http.StatusOK, res)
 }
@@ -681,7 +717,7 @@ func buyChair(c echo.Context) error {
 	if queries := chairPreparedQueriesOrNil(); queries != nil {
 		result, err = queries.buyChair.Exec(id)
 	} else {
-		result, err = chairDB.Exec("UPDATE chair SET stock = stock - 1 WHERE id = ? AND stock > 0", id)
+		result, err = chairDB.Exec("UPDATE chair SET stock = LAST_INSERT_ID(stock - 1) WHERE id = ? AND stock > 0", id)
 	}
 	if err != nil {
 		c.Echo().Logger.Errorf("chair stock update failed: %v", err)
@@ -698,7 +734,11 @@ func buyChair(c echo.Context) error {
 		return c.NoContent(http.StatusNotFound)
 	}
 
-	invalidateChairSearchCache()
+	remainingStock, stockErr := result.LastInsertId()
+	if stockErr != nil || remainingStock == 0 {
+		invalidateChairSearchCache()
+		forgetChair(id)
+	}
 
 	return c.NoContent(http.StatusOK)
 }
@@ -708,6 +748,10 @@ func getChairSearchCondition(c echo.Context) error {
 }
 
 func getLowPricedChair(c echo.Context) error {
+	if chairs, ok := getCachedLowPricedChairs(); ok {
+		return c.JSON(http.StatusOK, ChairListResponse{Chairs: chairs})
+	}
+	cacheGeneration := currentChairReadGeneration()
 	var chairs []Chair
 	var err error
 	if queries := chairPreparedQueriesOrNil(); queries != nil {
@@ -723,6 +767,7 @@ func getLowPricedChair(c echo.Context) error {
 		c.Logger().Errorf("getLowPricedChair DB execution error : %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	cacheLowPricedChairs(chairs, cacheGeneration)
 
 	return c.JSON(http.StatusOK, ChairListResponse{Chairs: chairs})
 }
@@ -732,6 +777,9 @@ func getEstateDetail(c echo.Context) error {
 	if err != nil {
 		c.Echo().Logger.Infof("Request parameter \"id\" parse error : %v", err)
 		return c.NoContent(http.StatusBadRequest)
+	}
+	if estate, ok := getCachedEstate(id); ok {
+		return c.JSON(http.StatusOK, estate)
 	}
 
 	var estate Estate
@@ -748,6 +796,7 @@ func getEstateDetail(c echo.Context) error {
 		c.Echo().Logger.Errorf("Database Execution error : %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	rememberEstate(estate)
 
 	return c.JSON(http.StatusOK, estate)
 }
@@ -852,6 +901,7 @@ func postEstate(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	invalidateEstateSearchCache()
+	invalidateEstateReadCaches()
 	return c.NoContent(http.StatusCreated)
 }
 
@@ -945,38 +995,59 @@ func searchEstates(c echo.Context) error {
 	searchQuery := "SELECT " + estatePublicColumns + " FROM estate AS estate WHERE "
 	countQuery := "SELECT COUNT(*) FROM estate AS estate WHERE "
 	searchCondition := strings.Join(conditions, " AND ")
-	limitOffset := " ORDER BY popularity DESC, id ASC LIMIT ? OFFSET ?"
-	cacheKey := c.Request().URL.RawQuery
+	limitOffset := " ORDER BY popularity_desc ASC, id ASC LIMIT ? OFFSET ?"
+	cacheKey := c.Request().URL.Query().Encode()
+	countValues := c.Request().URL.Query()
+	countValues.Del("page")
+	countValues.Del("perPage")
+	countCacheKey := countValues.Encode()
 	cacheGeneration := searchCache.currentEstateGeneration()
 	if cached, ok := searchCache.getEstate(cacheKey); ok {
 		return c.JSON(http.StatusOK, cached)
 	}
 
-	var res EstateSearchResponse
-	err = estateDB.Get(&res.Count, countQuery+searchCondition, params...)
-	if err != nil {
-		c.Logger().Errorf("searchEstates DB execution error : %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-
-	estates := []Estate{}
-	params = append(params, perPage, page*perPage)
-	err = estateDB.Select(&estates, searchQuery+searchCondition+limitOffset, params...)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return c.JSON(http.StatusOK, EstateSearchResponse{Count: 0, Estates: []Estate{}})
+	res, err := loadEstateSearchOnce(cacheKey, cacheGeneration, func() (EstateSearchResponse, error) {
+		if cached, ok := searchCache.getEstate(cacheKey); ok {
+			return cached, nil
 		}
+		count, countErr := loadEstateCountOnce(countCacheKey, cacheGeneration, func() (int64, error) {
+			if cachedCount, ok := searchCache.getEstateCount(countCacheKey); ok {
+				return cachedCount, nil
+			}
+			var loadedCount int64
+			if loadErr := estateDB.Get(&loadedCount, countQuery+searchCondition, params...); loadErr != nil {
+				return 0, loadErr
+			}
+			searchCache.putEstateCount(countCacheKey, loadedCount, cacheGeneration)
+			return loadedCount, nil
+		})
+		if countErr != nil {
+			return EstateSearchResponse{}, countErr
+		}
+
+		estates := []Estate{}
+		searchParams := append(append([]interface{}{}, params...), perPage, page*perPage)
+		if loadErr := estateDB.Select(&estates, searchQuery+searchCondition+limitOffset, searchParams...); loadErr != nil {
+			return EstateSearchResponse{}, loadErr
+		}
+		loaded := EstateSearchResponse{Count: count, Estates: estates}
+		rememberEstates(estates)
+		searchCache.putEstate(cacheKey, loaded, cacheGeneration)
+		return loaded, nil
+	})
+	if err != nil {
 		c.Logger().Errorf("searchEstates DB execution error : %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-
-	res.Estates = estates
-	searchCache.putEstate(cacheKey, res, cacheGeneration)
 
 	return c.JSON(http.StatusOK, res)
 }
 
 func getLowPricedEstate(c echo.Context) error {
+	if estates, ok := getCachedLowPricedEstates(); ok {
+		return c.JSON(http.StatusOK, EstateListResponse{Estates: estates})
+	}
+	cacheGeneration := currentEstateReadGeneration()
 	estates := make([]Estate, 0, Limit)
 	var err error
 	if queries := estatePreparedQueriesOrNil(); queries != nil {
@@ -992,6 +1063,8 @@ func getLowPricedEstate(c echo.Context) error {
 		c.Logger().Errorf("getLowPricedEstate DB execution error : %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	rememberEstates(estates)
+	cacheLowPricedEstates(estates, cacheGeneration)
 
 	return c.JSON(http.StatusOK, EstateListResponse{Estates: estates})
 }
@@ -1005,33 +1078,57 @@ func searchRecommendedEstateWithChair(c echo.Context) error {
 
 	// chair と estate は別インスタンスの MySQL に分かれているため JOIN はできない。
 	// chair を引いてから estate を引く2クエリ構成のまま、それぞれ対応する DB に振り分ける。
-	chair := Chair{}
-	if queries := chairPreparedQueriesOrNil(); queries != nil {
-		err = queries.recommendedChair.Get(&chair, id)
+	var dimensions [3]int64
+	if cachedDimensions, ok := getCachedChairDimensions(id); ok {
+		dimensions = cachedDimensions
 	} else {
-		err = chairDB.Get(&chair, "SELECT width, height, depth FROM chair WHERE id = ?", id)
-	}
-	if err != nil {
-		if err == sql.ErrNoRows {
-			c.Logger().Infof("Requested chair id \"%v\" not found", id)
-			return c.NoContent(http.StatusBadRequest)
+		chair := Chair{}
+		if queries := chairPreparedQueriesOrNil(); queries != nil {
+			err = queries.recommendedChair.Get(&chair, id)
+		} else {
+			err = chairDB.Get(&chair, "SELECT width, height, depth FROM chair WHERE id = ?", id)
 		}
-		c.Logger().Errorf("Database execution error : %v", err)
-		return c.NoContent(http.StatusInternalServerError)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				c.Logger().Infof("Requested chair id \"%v\" not found", id)
+				return c.NoContent(http.StatusBadRequest)
+			}
+			c.Logger().Errorf("Database execution error : %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+		dimensions = [3]int64{chair.Width, chair.Height, chair.Depth}
+		rememberChairDimensions(id, chair.Width, chair.Height, chair.Depth)
 	}
 
 	var estates []Estate
 	// 椅子がドアを通れるかどうかは、3辺のうち "最小の2辺" が door_width/door_height に
 	// (順不同で) 収まるかだけで判定できる。大きい辺を含む組み合わせは常によりきつい条件に
 	// なるため、6通りの順列を試す必要はなく、最小2辺による2パターンに帰着する。
-	sides := []int64{chair.Width, chair.Height, chair.Depth}
+	sides := []int64{dimensions[0], dimensions[1], dimensions[2]}
 	sort.Slice(sides, func(i, j int) bool { return sides[i] < sides[j] })
 	lo, mid := sides[0], sides[1]
-	if queries := estatePreparedQueriesOrNil(); queries != nil {
-		err = queries.recommendedEstate.Select(&estates, lo, mid, mid, lo, Limit)
-	} else {
-		err = estateDB.Select(&estates, "SELECT "+estatePublicColumns+" FROM estate WHERE (door_width >= ? AND door_height >= ?) OR (door_width >= ? AND door_height >= ?) ORDER BY popularity DESC, id ASC LIMIT ?", lo, mid, mid, lo, Limit)
+	if estates, ok := getCachedRecommendedEstates(lo, mid); ok {
+		return c.JSON(http.StatusOK, EstateListResponse{Estates: estates})
 	}
+	cacheGeneration := currentEstateReadGeneration()
+	estates, err = loadRecommendedEstatesOnce(lo, mid, cacheGeneration, func() ([]Estate, error) {
+		if cached, ok := getCachedRecommendedEstates(lo, mid); ok {
+			return cached, nil
+		}
+		loaded := []Estate{}
+		var loadErr error
+		if queries := estatePreparedQueriesOrNil(); queries != nil {
+			loadErr = queries.recommendedEstate.Select(&loaded, lo, mid, mid, lo, Limit)
+		} else {
+			loadErr = estateDB.Select(&loaded, "SELECT "+estatePublicColumns+" FROM estate WHERE (door_width >= ? AND door_height >= ?) OR (door_width >= ? AND door_height >= ?) ORDER BY popularity_desc ASC, id ASC LIMIT ?", lo, mid, mid, lo, Limit)
+		}
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		rememberEstates(loaded)
+		cacheRecommendedEstates(lo, mid, loaded, cacheGeneration)
+		return loaded, nil
+	})
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return c.JSON(http.StatusOK, EstateListResponse{[]Estate{}})
@@ -1061,7 +1158,7 @@ func searchEstateNazotte(c echo.Context) error {
 	if queries := estatePreparedQueriesOrNil(); queries != nil {
 		err = queries.nazotteEstate.Select(&estates, b.BottomRightCorner.Latitude, b.TopLeftCorner.Latitude, b.BottomRightCorner.Longitude, b.TopLeftCorner.Longitude, polygonText, NazotteLimit)
 	} else {
-		query := "SELECT " + estatePublicColumns + " FROM estate WHERE latitude <= ? AND latitude >= ? AND longitude <= ? AND longitude >= ? AND ST_Contains(ST_PolygonFromText(?), Point(latitude, longitude)) ORDER BY popularity DESC, id ASC LIMIT ?"
+		query := "SELECT " + estatePublicColumns + " FROM estate WHERE latitude <= ? AND latitude >= ? AND longitude <= ? AND longitude >= ? AND ST_Contains(ST_PolygonFromText(?), Point(latitude, longitude)) ORDER BY popularity_desc ASC, id ASC LIMIT ?"
 		err = estateDB.Select(&estates, query, b.BottomRightCorner.Latitude, b.TopLeftCorner.Latitude, b.BottomRightCorner.Longitude, b.TopLeftCorner.Longitude, polygonText, NazotteLimit)
 	}
 	if err == sql.ErrNoRows {
@@ -1071,6 +1168,7 @@ func searchEstateNazotte(c echo.Context) error {
 		c.Echo().Logger.Errorf("database execution error : %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	rememberEstates(estates)
 
 	return c.JSON(http.StatusOK, EstateSearchResponse{Count: int64(len(estates)), Estates: estates})
 }
@@ -1093,6 +1191,9 @@ func postEstateRequestDocument(c echo.Context) error {
 		c.Echo().Logger.Infof("post request document failed : %v", err)
 		return c.NoContent(http.StatusBadRequest)
 	}
+	if isKnownEstate(id) {
+		return c.NoContent(http.StatusOK)
+	}
 
 	var exists int
 	if queries := estatePreparedQueriesOrNil(); queries != nil {
@@ -1107,6 +1208,7 @@ func postEstateRequestDocument(c echo.Context) error {
 		c.Logger().Errorf("postEstateRequestDocument DB execution error : %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	rememberEstateID(id)
 
 	return c.NoContent(http.StatusOK)
 }

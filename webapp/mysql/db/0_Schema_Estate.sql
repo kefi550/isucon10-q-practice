@@ -16,10 +16,13 @@ CREATE TABLE isuumo.estate
     door_width  INTEGER             NOT NULL,
     features    VARCHAR(64)         NOT NULL,
     popularity  INTEGER             NOT NULL,
+    -- See the chair schema for why this generated sort key is necessary on
+    -- MySQL 5.7.  It preserves popularity DESC, id ASC exactly.
+    popularity_desc INTEGER GENERATED ALWAYS AS (-popularity) STORED,
     INDEX idx_door_width_height (door_width, door_height),
     INDEX idx_door_height_width (door_height, door_width),
     INDEX idx_rent_id (rent, id),
-    INDEX idx_estate_popularity_id (popularity, id),
+    INDEX idx_estate_popularity_id (popularity_desc, id),
     INDEX idx_estate_latitude_longitude (latitude, longitude)
 );
 
