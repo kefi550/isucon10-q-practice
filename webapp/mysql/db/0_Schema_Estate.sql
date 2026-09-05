@@ -1,4 +1,4 @@
--- estate は isu1 の MySQL でホストする (chair は isu2、0_Schema_Chair.sql を参照)
+-- estate は isu3 の MySQL でホストする (アプリ本体・nginx は isu1、chair は isu2、0_Schema_Chair.sql を参照)
 DROP DATABASE IF EXISTS isuumo;
 CREATE DATABASE isuumo;
 

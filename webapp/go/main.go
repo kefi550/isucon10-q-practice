@@ -27,7 +27,7 @@ const NazotteLimit = 50
 const maxDBConnections = 10
 
 // estate と chair は互いに独立なテーブルなので、別々の MySQL インスタンスに分割できる。
-// estate は isu1 (アプリと同居)、chair は isu2 でホストする。
+// アプリ本体・nginx は isu1 のまま、estate は isu3、chair は isu2 の MySQL でホストする。
 var estateDB *sqlx.DB
 var chairDB *sqlx.DB
 var estateMySQLConnectionData *MySQLConnectionEnv
