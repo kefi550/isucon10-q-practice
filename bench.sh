@@ -7,6 +7,12 @@ if [[ -f "$script_dir/.env" ]]; then
 	source "$script_dir/.env"
 fi
 
+lock_file='~/isuumo/bench.lock'
+if ! ssh bench "set -C; : > $lock_file" 2>/dev/null; then
+	echo 'ベンチマークまたは push が実行中です' >&2
+	exit 1
+fi
+
 notify_discord() {
 	local message=$1
 	local payload
@@ -24,7 +30,7 @@ if [[ -n "${WEBHOOK_URL:-}" ]]; then
 fi
 
 output_file=$(mktemp)
-trap 'rm -f "$output_file"' EXIT
+trap 'ssh bench "rm -f '$lock_file'"; rm -f "$output_file"' EXIT
 
 ssh bench "cd ~/isuumo/bench && ./bench --target-url http://isu1:80" | tee "$output_file"
 benchmark_status=${PIPESTATUS[0]}

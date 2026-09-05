@@ -4,6 +4,13 @@ set -eu
 
 LOCAL_PATH="."
 NGINX_CONFIG="${LOCAL_PATH}/isu1/etc/nginx/sites-available/sites-available/isuumo.conf"
+LOCK_FILE='~/isuumo/bench.lock'
+
+if ! ssh bench "set -C; : > $LOCK_FILE" 2>/dev/null; then
+  echo 'ベンチマークまたは push が実行中です' >&2
+  exit 1
+fi
+trap 'ssh bench "rm -f '$LOCK_FILE'"' EXIT
 
 for i in $(seq 1); do
   host="isu${i}"
