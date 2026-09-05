@@ -19,7 +19,10 @@ CREATE TABLE isuumo.estate
     features    VARCHAR(64)         NOT NULL,
     popularity  INTEGER             NOT NULL,
     INDEX idx_door_width_height (door_width, door_height),
-    INDEX idx_door_height_width (door_height, door_width)
+    INDEX idx_door_height_width (door_height, door_width),
+    -- ORDER BY rent ASC, id ASC (getLowPricedEstate) をインデックスだけで解決しつつ、
+    -- rent の範囲条件 (searchEstates の SELECT/COUNT) の絞り込みにも使う
+    INDEX idx_rent_id (rent, id)
 );
 
 CREATE TABLE isuumo.chair
@@ -36,5 +39,9 @@ CREATE TABLE isuumo.chair
     features    VARCHAR(64)     NOT NULL,
     kind        VARCHAR(64)     NOT NULL,
     popularity  INTEGER         NOT NULL,
-    stock       INTEGER         NOT NULL
+    stock       INTEGER         NOT NULL,
+    -- ORDER BY price ASC, id ASC (getLowPricedChair) をインデックスだけで解決する
+    INDEX idx_price_id (price, id),
+    -- price の範囲条件 + stock > 0 (searchChairs の SELECT/COUNT) の絞り込みに使う
+    INDEX idx_price_stock (price, stock)
 );
