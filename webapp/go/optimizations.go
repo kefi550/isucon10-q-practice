@@ -117,6 +117,15 @@ func invalidateAllSearchCaches() {
 	searchCache.mu.Unlock()
 }
 
+// dbForKind は "chair"/"estate" のどちらの feature index / prepared statement を
+// 扱っているかに応じて、対応する分割先の *sqlx.DB を返す。
+func dbForKind(kind string) *sqlx.DB {
+	if kind == "chair" {
+		return chairDB
+	}
+	return estateDB
+}
+
 type featureIndexState struct {
 	mu sync.Mutex
 
@@ -234,25 +243,35 @@ func rebuildFeatureIndexTxForKind(tx *sql.Tx, kind string) error {
 	return rebuildFeatureIndexTx(tx, baseTable, indexTable, idColumn, features)
 }
 
-func rebuildFeatureIndexes() error {
-	tx, err := db.Begin()
+// rebuildFeatureIndexForKind は指定した kind ("chair" または "estate") の feature index を
+// その kind が実際に置かれている DB (chairDB / estateDB) 上のトランザクションで再構築する。
+// chair と estate は別インスタンスの MySQL に分かれているため、1つのトランザクションに
+// まとめることはできない。
+func rebuildFeatureIndexForKind(kind string) error {
+	tx, err := dbForKind(kind).Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	if err := rebuildFeatureIndexTxForKind(tx, "chair"); err != nil {
-		return err
-	}
-	if err := rebuildFeatureIndexTxForKind(tx, "estate"); err != nil {
+	if err := rebuildFeatureIndexTxForKind(tx, kind); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 
-	markFeatureIndexReady("chair")
-	markFeatureIndexReady("estate")
+	markFeatureIndexReady(kind)
+	return nil
+}
+
+func rebuildFeatureIndexes() error {
+	if err := rebuildFeatureIndexForKind("chair"); err != nil {
+		return err
+	}
+	if err := rebuildFeatureIndexForKind("estate"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -294,11 +313,12 @@ func ensureFeatureIndex(kind string) bool {
 	if ready {
 		return true
 	}
-	if unavailable || db == nil {
+	targetDB := dbForKind(kind)
+	if unavailable || targetDB == nil {
 		return false
 	}
 
-	tx, err := db.Begin()
+	tx, err := targetDB.Begin()
 	if err == nil {
 		err = rebuildFeatureIndexTxForKind(tx, kind)
 	}
@@ -332,62 +352,63 @@ func ensureEstateFeatureIndex() bool {
 	return ensureFeatureIndex("estate")
 }
 
-type preparedQuerySet struct {
-	chairDetail       *sqlx.Stmt
-	buyChair          *sqlx.Stmt
-	lowPricedChair    *sqlx.Stmt
+// chair 用と estate 用の prepared statement は、それぞれ chairDB / estateDB という
+// 別インスタンスの MySQL に対して個別に準備する必要がある。
+
+type chairPreparedQuerySet struct {
+	chairDetail      *sqlx.Stmt
+	buyChair         *sqlx.Stmt
+	lowPricedChair   *sqlx.Stmt
+	recommendedChair *sqlx.Stmt
+}
+
+func (queries *chairPreparedQuerySet) close() {
+	if queries == nil {
+		return
+	}
+	for _, stmt := range []*sqlx.Stmt{queries.chairDetail, queries.buyChair, queries.lowPricedChair, queries.recommendedChair} {
+		if stmt != nil {
+			_ = stmt.Close()
+		}
+	}
+}
+
+type estatePreparedQuerySet struct {
 	estateDetail      *sqlx.Stmt
 	lowPricedEstate   *sqlx.Stmt
-	recommendedChair  *sqlx.Stmt
 	recommendedEstate *sqlx.Stmt
 	estateExists      *sqlx.Stmt
 	nazotteEstate     *sqlx.Stmt
 }
 
-func (queries *preparedQuerySet) close() {
+func (queries *estatePreparedQuerySet) close() {
 	if queries == nil {
 		return
 	}
-	if queries.chairDetail != nil {
-		_ = queries.chairDetail.Close()
-	}
-	if queries.buyChair != nil {
-		_ = queries.buyChair.Close()
-	}
-	if queries.lowPricedChair != nil {
-		_ = queries.lowPricedChair.Close()
-	}
-	if queries.estateDetail != nil {
-		_ = queries.estateDetail.Close()
-	}
-	if queries.lowPricedEstate != nil {
-		_ = queries.lowPricedEstate.Close()
-	}
-	if queries.recommendedChair != nil {
-		_ = queries.recommendedChair.Close()
-	}
-	if queries.recommendedEstate != nil {
-		_ = queries.recommendedEstate.Close()
-	}
-	if queries.estateExists != nil {
-		_ = queries.estateExists.Close()
-	}
-	if queries.nazotteEstate != nil {
-		_ = queries.nazotteEstate.Close()
+	for _, stmt := range []*sqlx.Stmt{queries.estateDetail, queries.lowPricedEstate, queries.recommendedEstate, queries.estateExists, queries.nazotteEstate} {
+		if stmt != nil {
+			_ = stmt.Close()
+		}
 	}
 }
 
-var preparedQueryState struct {
+var chairPreparedQueryState struct {
 	sync.RWMutex
-	queries     *preparedQuerySet
+	queries     *chairPreparedQuerySet
 	unavailable bool
 }
 
-func prepareQuerySet() (*preparedQuerySet, error) {
-	queries := &preparedQuerySet{}
+var estatePreparedQueryState struct {
+	sync.RWMutex
+	queries     *estatePreparedQuerySet
+	unavailable bool
+}
+
+func prepareChairQuerySet() (*chairPreparedQuerySet, error) {
+	queries := &chairPreparedQuerySet{}
 	var err error
 	prepare := func(destination **sqlx.Stmt, query string) error {
-		*destination, err = db.Preparex(query)
+		*destination, err = chairDB.Preparex(query)
 		return err
 	}
 
@@ -403,15 +424,26 @@ func prepareQuerySet() (*preparedQuerySet, error) {
 		queries.close()
 		return nil, err
 	}
+	if err := prepare(&queries.recommendedChair, "SELECT width, height, depth FROM chair WHERE id = ?"); err != nil {
+		queries.close()
+		return nil, err
+	}
+	return queries, nil
+}
+
+func prepareEstateQuerySet() (*estatePreparedQuerySet, error) {
+	queries := &estatePreparedQuerySet{}
+	var err error
+	prepare := func(destination **sqlx.Stmt, query string) error {
+		*destination, err = estateDB.Preparex(query)
+		return err
+	}
+
 	if err := prepare(&queries.estateDetail, "SELECT "+estatePublicColumns+" FROM estate WHERE id = ?"); err != nil {
 		queries.close()
 		return nil, err
 	}
 	if err := prepare(&queries.lowPricedEstate, "SELECT "+estatePublicColumns+" FROM estate ORDER BY rent ASC, id ASC LIMIT ?"); err != nil {
-		queries.close()
-		return nil, err
-	}
-	if err := prepare(&queries.recommendedChair, "SELECT width, height, depth FROM chair WHERE id = ?"); err != nil {
 		queries.close()
 		return nil, err
 	}
@@ -430,49 +462,96 @@ func prepareQuerySet() (*preparedQuerySet, error) {
 	return queries, nil
 }
 
-func preparedQueriesOrNil() *preparedQuerySet {
-	preparedQueryState.RLock()
-	queries := preparedQueryState.queries
-	unavailable := preparedQueryState.unavailable
-	preparedQueryState.RUnlock()
-	if queries != nil || unavailable || db == nil {
+func chairPreparedQueriesOrNil() *chairPreparedQuerySet {
+	chairPreparedQueryState.RLock()
+	queries := chairPreparedQueryState.queries
+	unavailable := chairPreparedQueryState.unavailable
+	chairPreparedQueryState.RUnlock()
+	if queries != nil || unavailable || chairDB == nil {
 		return queries
 	}
 
-	preparedQueryState.Lock()
-	defer preparedQueryState.Unlock()
-	if preparedQueryState.queries != nil || preparedQueryState.unavailable || db == nil {
-		return preparedQueryState.queries
+	chairPreparedQueryState.Lock()
+	defer chairPreparedQueryState.Unlock()
+	if chairPreparedQueryState.queries != nil || chairPreparedQueryState.unavailable || chairDB == nil {
+		return chairPreparedQueryState.queries
 	}
 
-	queries, err := prepareQuerySet()
+	queries, err := prepareChairQuerySet()
 	if err != nil {
-		preparedQueryState.unavailable = true
+		chairPreparedQueryState.unavailable = true
 		return nil
 	}
-	preparedQueryState.queries = queries
+	chairPreparedQueryState.queries = queries
 	return queries
 }
 
-func invalidatePreparedQueries() {
-	preparedQueryState.Lock()
-	queries := preparedQueryState.queries
-	preparedQueryState.queries = nil
-	preparedQueryState.unavailable = false
-	preparedQueryState.Unlock()
+func estatePreparedQueriesOrNil() *estatePreparedQuerySet {
+	estatePreparedQueryState.RLock()
+	queries := estatePreparedQueryState.queries
+	unavailable := estatePreparedQueryState.unavailable
+	estatePreparedQueryState.RUnlock()
+	if queries != nil || unavailable || estateDB == nil {
+		return queries
+	}
+
+	estatePreparedQueryState.Lock()
+	defer estatePreparedQueryState.Unlock()
+	if estatePreparedQueryState.queries != nil || estatePreparedQueryState.unavailable || estateDB == nil {
+		return estatePreparedQueryState.queries
+	}
+
+	queries, err := prepareEstateQuerySet()
+	if err != nil {
+		estatePreparedQueryState.unavailable = true
+		return nil
+	}
+	estatePreparedQueryState.queries = queries
+	return queries
+}
+
+func invalidateChairPreparedQueries() {
+	chairPreparedQueryState.Lock()
+	queries := chairPreparedQueryState.queries
+	chairPreparedQueryState.queries = nil
+	chairPreparedQueryState.unavailable = false
+	chairPreparedQueryState.Unlock()
 	queries.close()
 }
 
+func invalidateEstatePreparedQueries() {
+	estatePreparedQueryState.Lock()
+	queries := estatePreparedQueryState.queries
+	estatePreparedQueryState.queries = nil
+	estatePreparedQueryState.unavailable = false
+	estatePreparedQueryState.Unlock()
+	queries.close()
+}
+
+// reopenDBPool は estateDB / chairDB の両方の接続プールを張り直す。
+// /initialize でスキーマを作り直した後、古いコネクションが不整合な状態を
+// キャッシュし続けないようにするために呼ぶ。
 func reopenDBPool() error {
-	next, err := mySQLConnectionData.ConnectDB()
+	nextEstate, err := estateMySQLConnectionData.ConnectDB()
 	if err != nil {
 		return err
 	}
-	next.SetMaxOpenConns(10)
-	old := db
-	db = next
-	if old != nil {
-		_ = old.Close()
+	nextEstate.SetMaxOpenConns(10)
+	oldEstate := estateDB
+	estateDB = nextEstate
+	if oldEstate != nil {
+		_ = oldEstate.Close()
+	}
+
+	nextChair, err := chairMySQLConnectionData.ConnectDB()
+	if err != nil {
+		return err
+	}
+	nextChair.SetMaxOpenConns(10)
+	oldChair := chairDB
+	chairDB = nextChair
+	if oldChair != nil {
+		_ = oldChair.Close()
 	}
 	return nil
 }
