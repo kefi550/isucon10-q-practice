@@ -18,6 +18,59 @@ const (
 	estateFeatureTable = "estate_feature"
 )
 
+var (
+	estateDoorRanges = []Range{
+		{ID: 0, Min: -1, Max: 80},
+		{ID: 1, Min: 80, Max: 110},
+		{ID: 2, Min: 110, Max: 150},
+		{ID: 3, Min: 150, Max: -1},
+	}
+	estateRentRanges = []Range{
+		{ID: 0, Min: -1, Max: 50000},
+		{ID: 1, Min: 50000, Max: 100000},
+		{ID: 2, Min: 100000, Max: 150000},
+		{ID: 3, Min: 150000, Max: -1},
+	}
+)
+
+func rangeConditionMatches(condition RangeCondition, expected []Range) bool {
+	if len(condition.Ranges) != len(expected) {
+		return false
+	}
+	for i, expectedRange := range expected {
+		actual := condition.Ranges[i]
+		if actual == nil || *actual != expectedRange {
+			return false
+		}
+	}
+	return true
+}
+
+func appendEstateRangeSearchCondition(
+	conditions []string,
+	params []interface{},
+	condition RangeCondition,
+	selected *Range,
+	expected []Range,
+	valueColumn string,
+	bucketColumn string,
+) ([]string, []interface{}) {
+	if rangeConditionMatches(condition, expected) {
+		conditions = append(conditions, bucketColumn+" = ?")
+		params = append(params, selected.ID)
+		return conditions, params
+	}
+	if selected.Min != -1 {
+		conditions = append(conditions, valueColumn+" >= ?")
+		params = append(params, selected.Min)
+	}
+	if selected.Max != -1 {
+		conditions = append(conditions, valueColumn+" < ?")
+		params = append(params, selected.Max)
+	}
+	return conditions, params
+}
+
 const maxSearchCacheEntries = 512
 
 type searchResponseCache struct {

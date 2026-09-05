@@ -19,9 +19,24 @@ CREATE TABLE isuumo.estate
     -- See the chair schema for why this generated sort key is necessary on
     -- MySQL 5.7.  It preserves popularity DESC, id ASC exactly.
     popularity_desc INTEGER GENERATED ALWAYS AS (-popularity) STORED,
+    -- The search fixture divides these values into fixed, non-overlapping
+    -- buckets. Equality predicates on the generated IDs let MySQL use every
+    -- range dimension and then continue scanning in response order.
+    door_height_range_id TINYINT GENERATED ALWAYS AS
+        (CASE WHEN door_height < 80 THEN 0 WHEN door_height < 110 THEN 1 WHEN door_height < 150 THEN 2 ELSE 3 END) STORED,
+    door_width_range_id TINYINT GENERATED ALWAYS AS
+        (CASE WHEN door_width < 80 THEN 0 WHEN door_width < 110 THEN 1 WHEN door_width < 150 THEN 2 ELSE 3 END) STORED,
+    rent_range_id TINYINT GENERATED ALWAYS AS
+        (CASE WHEN rent < 50000 THEN 0 WHEN rent < 100000 THEN 1 WHEN rent < 150000 THEN 2 ELSE 3 END) STORED,
     INDEX idx_door_width_height (door_width, door_height),
     INDEX idx_door_height_width (door_height, door_width),
     INDEX idx_rent_id (rent, id),
+    INDEX idx_estate_height_width_rent_popularity
+        (door_height_range_id, door_width_range_id, rent_range_id, popularity_desc, id),
+    INDEX idx_estate_width_rent_popularity
+        (door_width_range_id, rent_range_id, popularity_desc, id),
+    INDEX idx_estate_height_rent_popularity
+        (door_height_range_id, rent_range_id, popularity_desc, id),
     INDEX idx_estate_popularity_id (popularity_desc, id),
     INDEX idx_estate_latitude_longitude (latitude, longitude)
 );

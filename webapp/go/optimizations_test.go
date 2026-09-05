@@ -5,6 +5,55 @@ import (
 	"testing"
 )
 
+func rangeCondition(ranges []Range) RangeCondition {
+	condition := RangeCondition{Ranges: make([]*Range, len(ranges))}
+	for i := range ranges {
+		rangeCopy := ranges[i]
+		condition.Ranges[i] = &rangeCopy
+	}
+	return condition
+}
+
+func TestAppendEstateRangeSearchConditionUsesConfiguredBucket(t *testing.T) {
+	condition := rangeCondition(estateDoorRanges)
+	conditions, params := appendEstateRangeSearchCondition(
+		[]string{"existing = ?"}, []interface{}{1}, condition, condition.Ranges[2],
+		estateDoorRanges, "door_height", "door_height_range_id",
+	)
+
+	if want := []string{"existing = ?", "door_height_range_id = ?"}; !reflect.DeepEqual(conditions, want) {
+		t.Fatalf("unexpected conditions: %#v", conditions)
+	}
+	if want := []interface{}{1, int64(2)}; !reflect.DeepEqual(params, want) {
+		t.Fatalf("unexpected params: %#v", params)
+	}
+}
+
+func TestAppendEstateRangeSearchConditionFallsBackForDifferentFixture(t *testing.T) {
+	condition := rangeCondition(estateRentRanges)
+	condition.Ranges[1].Max = 99999
+	selected := &Range{ID: 7, Min: 50000, Max: 99999}
+	conditions, params := appendEstateRangeSearchCondition(
+		nil, nil, condition, selected,
+		estateRentRanges, "rent", "rent_range_id",
+	)
+
+	if want := []string{"rent >= ?", "rent < ?"}; !reflect.DeepEqual(conditions, want) {
+		t.Fatalf("unexpected conditions: %#v", conditions)
+	}
+	if want := []interface{}{int64(50000), int64(99999)}; !reflect.DeepEqual(params, want) {
+		t.Fatalf("unexpected params: %#v", params)
+	}
+}
+
+func TestRangeConditionMatchesRejectsNilRange(t *testing.T) {
+	condition := rangeCondition(estateDoorRanges)
+	condition.Ranges[0] = nil
+	if rangeConditionMatches(condition, estateDoorRanges) {
+		t.Fatal("range condition with a nil range matched generated buckets")
+	}
+}
+
 func TestAppendFeatureSearchConditionsAggregatesConfiguredFeatures(t *testing.T) {
 	conditions, params := appendFeatureSearchConditions(
 		[]string{"price >= ?"},

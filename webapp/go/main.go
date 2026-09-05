@@ -917,14 +917,10 @@ func searchEstates(c echo.Context) error {
 			return c.NoContent(http.StatusBadRequest)
 		}
 
-		if doorHeight.Min != -1 {
-			conditions = append(conditions, "door_height >= ?")
-			params = append(params, doorHeight.Min)
-		}
-		if doorHeight.Max != -1 {
-			conditions = append(conditions, "door_height < ?")
-			params = append(params, doorHeight.Max)
-		}
+		conditions, params = appendEstateRangeSearchCondition(
+			conditions, params, estateSearchCondition.DoorHeight, doorHeight,
+			estateDoorRanges, "door_height", "door_height_range_id",
+		)
 	}
 
 	if c.QueryParam("doorWidthRangeId") != "" {
@@ -934,14 +930,10 @@ func searchEstates(c echo.Context) error {
 			return c.NoContent(http.StatusBadRequest)
 		}
 
-		if doorWidth.Min != -1 {
-			conditions = append(conditions, "door_width >= ?")
-			params = append(params, doorWidth.Min)
-		}
-		if doorWidth.Max != -1 {
-			conditions = append(conditions, "door_width < ?")
-			params = append(params, doorWidth.Max)
-		}
+		conditions, params = appendEstateRangeSearchCondition(
+			conditions, params, estateSearchCondition.DoorWidth, doorWidth,
+			estateDoorRanges, "door_width", "door_width_range_id",
+		)
 	}
 
 	if c.QueryParam("rentRangeId") != "" {
@@ -951,14 +943,10 @@ func searchEstates(c echo.Context) error {
 			return c.NoContent(http.StatusBadRequest)
 		}
 
-		if estateRent.Min != -1 {
-			conditions = append(conditions, "rent >= ?")
-			params = append(params, estateRent.Min)
-		}
-		if estateRent.Max != -1 {
-			conditions = append(conditions, "rent < ?")
-			params = append(params, estateRent.Max)
-		}
+		conditions, params = appendEstateRangeSearchCondition(
+			conditions, params, estateSearchCondition.Rent, estateRent,
+			estateRentRanges, "rent", "rent_range_id",
+		)
 	}
 
 	featureQuery := c.QueryParam("features")
