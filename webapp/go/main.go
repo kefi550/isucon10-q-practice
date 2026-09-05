@@ -531,6 +531,16 @@ func postChair(c echo.Context) error {
 func searchChairs(c echo.Context) error {
 	conditions := make([]string, 0)
 	params := make([]interface{}, 0)
+	usePriceHeightBuckets := c.QueryParam("priceRangeId") != "" &&
+		c.QueryParam("heightRangeId") != "" &&
+		rangeConditionMatches(chairSearchCondition.Price, chairPriceRanges) &&
+		rangeConditionMatches(chairSearchCondition.Height, chairDimensionRanges)
+	priceBucketRanges := []Range(nil)
+	heightBucketRanges := []Range(nil)
+	if usePriceHeightBuckets {
+		priceBucketRanges = chairPriceRanges
+		heightBucketRanges = chairDimensionRanges
+	}
 
 	if c.QueryParam("priceRangeId") != "" {
 		chairPrice, err := getRange(chairSearchCondition.Price, c.QueryParam("priceRangeId"))
@@ -539,14 +549,10 @@ func searchChairs(c echo.Context) error {
 			return c.NoContent(http.StatusBadRequest)
 		}
 
-		if chairPrice.Min != -1 {
-			conditions = append(conditions, "price >= ?")
-			params = append(params, chairPrice.Min)
-		}
-		if chairPrice.Max != -1 {
-			conditions = append(conditions, "price < ?")
-			params = append(params, chairPrice.Max)
-		}
+		conditions, params = appendBucketedRangeSearchCondition(
+			conditions, params, chairSearchCondition.Price, chairPrice,
+			priceBucketRanges, "price", "price_range_id",
+		)
 	}
 
 	if c.QueryParam("heightRangeId") != "" {
@@ -556,14 +562,10 @@ func searchChairs(c echo.Context) error {
 			return c.NoContent(http.StatusBadRequest)
 		}
 
-		if chairHeight.Min != -1 {
-			conditions = append(conditions, "height >= ?")
-			params = append(params, chairHeight.Min)
-		}
-		if chairHeight.Max != -1 {
-			conditions = append(conditions, "height < ?")
-			params = append(params, chairHeight.Max)
-		}
+		conditions, params = appendBucketedRangeSearchCondition(
+			conditions, params, chairSearchCondition.Height, chairHeight,
+			heightBucketRanges, "height", "height_range_id",
+		)
 	}
 
 	if c.QueryParam("widthRangeId") != "" {
@@ -917,7 +919,7 @@ func searchEstates(c echo.Context) error {
 			return c.NoContent(http.StatusBadRequest)
 		}
 
-		conditions, params = appendEstateRangeSearchCondition(
+		conditions, params = appendBucketedRangeSearchCondition(
 			conditions, params, estateSearchCondition.DoorHeight, doorHeight,
 			estateDoorRanges, "door_height", "door_height_range_id",
 		)
@@ -930,7 +932,7 @@ func searchEstates(c echo.Context) error {
 			return c.NoContent(http.StatusBadRequest)
 		}
 
-		conditions, params = appendEstateRangeSearchCondition(
+		conditions, params = appendBucketedRangeSearchCondition(
 			conditions, params, estateSearchCondition.DoorWidth, doorWidth,
 			estateDoorRanges, "door_width", "door_width_range_id",
 		)
@@ -943,7 +945,7 @@ func searchEstates(c echo.Context) error {
 			return c.NoContent(http.StatusBadRequest)
 		}
 
-		conditions, params = appendEstateRangeSearchCondition(
+		conditions, params = appendBucketedRangeSearchCondition(
 			conditions, params, estateSearchCondition.Rent, estateRent,
 			estateRentRanges, "rent", "rent_range_id",
 		)

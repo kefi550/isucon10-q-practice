@@ -19,6 +19,20 @@ const (
 )
 
 var (
+	chairDimensionRanges = []Range{
+		{ID: 0, Min: -1, Max: 80},
+		{ID: 1, Min: 80, Max: 110},
+		{ID: 2, Min: 110, Max: 150},
+		{ID: 3, Min: 150, Max: -1},
+	}
+	chairPriceRanges = []Range{
+		{ID: 0, Min: -1, Max: 3000},
+		{ID: 1, Min: 3000, Max: 6000},
+		{ID: 2, Min: 6000, Max: 9000},
+		{ID: 3, Min: 9000, Max: 12000},
+		{ID: 4, Min: 12000, Max: 15000},
+		{ID: 5, Min: 15000, Max: -1},
+	}
 	estateDoorRanges = []Range{
 		{ID: 0, Min: -1, Max: 80},
 		{ID: 1, Min: 80, Max: 110},
@@ -46,7 +60,7 @@ func rangeConditionMatches(condition RangeCondition, expected []Range) bool {
 	return true
 }
 
-func appendEstateRangeSearchCondition(
+func appendBucketedRangeSearchCondition(
 	conditions []string,
 	params []interface{},
 	condition RangeCondition,
@@ -71,7 +85,11 @@ func appendEstateRangeSearchCondition(
 	return conditions, params
 }
 
-const maxSearchCacheEntries = 512
+const (
+	maxChairSearchResponseCacheEntries = 8192
+	maxChairSearchCountCacheEntries    = 4096
+	maxSearchCacheEntries              = 512
+)
 
 type searchResponseCache struct {
 	mu               sync.RWMutex
@@ -268,8 +286,11 @@ func (cache *searchResponseCache) putChair(key string, response ChairSearchRespo
 		cache.mu.Unlock()
 		return
 	}
-	if _, exists := cache.chairs[key]; !exists && len(cache.chairs) >= maxSearchCacheEntries {
-		cache.chairs = make(map[string]ChairSearchResponse)
+	if _, exists := cache.chairs[key]; !exists && len(cache.chairs) >= maxChairSearchResponseCacheEntries {
+		for evictedKey := range cache.chairs {
+			delete(cache.chairs, evictedKey)
+			break
+		}
 	}
 	cache.chairs[key] = cloneChairSearchResponse(response)
 	cache.mu.Unlock()
@@ -288,8 +309,11 @@ func (cache *searchResponseCache) putChairCount(key string, count int64, generat
 		if cache.chairCounts == nil {
 			cache.chairCounts = make(map[string]int64)
 		}
-		if _, exists := cache.chairCounts[key]; !exists && len(cache.chairCounts) >= maxSearchCacheEntries {
-			cache.chairCounts = make(map[string]int64)
+		if _, exists := cache.chairCounts[key]; !exists && len(cache.chairCounts) >= maxChairSearchCountCacheEntries {
+			for evictedKey := range cache.chairCounts {
+				delete(cache.chairCounts, evictedKey)
+				break
+			}
 		}
 		cache.chairCounts[key] = count
 	}

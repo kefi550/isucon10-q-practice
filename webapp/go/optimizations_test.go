@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -14,9 +15,9 @@ func rangeCondition(ranges []Range) RangeCondition {
 	return condition
 }
 
-func TestAppendEstateRangeSearchConditionUsesConfiguredBucket(t *testing.T) {
+func TestAppendBucketedRangeSearchConditionUsesConfiguredBucket(t *testing.T) {
 	condition := rangeCondition(estateDoorRanges)
-	conditions, params := appendEstateRangeSearchCondition(
+	conditions, params := appendBucketedRangeSearchCondition(
 		[]string{"existing = ?"}, []interface{}{1}, condition, condition.Ranges[2],
 		estateDoorRanges, "door_height", "door_height_range_id",
 	)
@@ -29,11 +30,11 @@ func TestAppendEstateRangeSearchConditionUsesConfiguredBucket(t *testing.T) {
 	}
 }
 
-func TestAppendEstateRangeSearchConditionFallsBackForDifferentFixture(t *testing.T) {
+func TestAppendBucketedRangeSearchConditionFallsBackForDifferentFixture(t *testing.T) {
 	condition := rangeCondition(estateRentRanges)
 	condition.Ranges[1].Max = 99999
 	selected := &Range{ID: 7, Min: 50000, Max: 99999}
-	conditions, params := appendEstateRangeSearchCondition(
+	conditions, params := appendBucketedRangeSearchCondition(
 		nil, nil, condition, selected,
 		estateRentRanges, "rent", "rent_range_id",
 	)
@@ -42,6 +43,21 @@ func TestAppendEstateRangeSearchConditionFallsBackForDifferentFixture(t *testing
 		t.Fatalf("unexpected conditions: %#v", conditions)
 	}
 	if want := []interface{}{int64(50000), int64(99999)}; !reflect.DeepEqual(params, want) {
+		t.Fatalf("unexpected params: %#v", params)
+	}
+}
+
+func TestAppendBucketedRangeSearchConditionUsesChairPriceBucket(t *testing.T) {
+	condition := rangeCondition(chairPriceRanges)
+	conditions, params := appendBucketedRangeSearchCondition(
+		nil, nil, condition, condition.Ranges[4],
+		chairPriceRanges, "price", "price_range_id",
+	)
+
+	if want := []string{"price_range_id = ?"}; !reflect.DeepEqual(conditions, want) {
+		t.Fatalf("unexpected conditions: %#v", conditions)
+	}
+	if want := []interface{}{int64(4)}; !reflect.DeepEqual(params, want) {
 		t.Fatalf("unexpected params: %#v", params)
 	}
 }
@@ -191,6 +207,36 @@ func TestSearchCountCacheIsSharedAcrossPagesAndInvalidated(t *testing.T) {
 	invalidateEstateSearchCache()
 	if _, ok := searchCache.getEstateCount("rentRangeId=1"); ok {
 		t.Fatal("estate count survived estate invalidation")
+	}
+}
+
+func TestChairSearchCachesEvictSingleEntryAtCapacity(t *testing.T) {
+	searchCache = searchResponseCache{
+		chairs:      make(map[string]ChairSearchResponse),
+		chairCounts: make(map[string]int64),
+	}
+	generation := searchCache.currentChairGeneration()
+
+	for i := 0; i < maxChairSearchResponseCacheEntries; i++ {
+		searchCache.putChair(fmt.Sprintf("response-%d", i), ChairSearchResponse{Count: int64(i)}, generation)
+	}
+	searchCache.putChair("response-overflow", ChairSearchResponse{Count: 1}, generation)
+	if got := len(searchCache.chairs); got != maxChairSearchResponseCacheEntries {
+		t.Fatalf("unexpected chair response cache size after eviction: %d", got)
+	}
+	if _, ok := searchCache.getChair("response-overflow"); !ok {
+		t.Fatal("new chair response was not cached after eviction")
+	}
+
+	for i := 0; i < maxChairSearchCountCacheEntries; i++ {
+		searchCache.putChairCount(fmt.Sprintf("count-%d", i), int64(i), generation)
+	}
+	searchCache.putChairCount("count-overflow", 1, generation)
+	if got := len(searchCache.chairCounts); got != maxChairSearchCountCacheEntries {
+		t.Fatalf("unexpected chair count cache size after eviction: %d", got)
+	}
+	if _, ok := searchCache.getChairCount("count-overflow"); !ok {
+		t.Fatal("new chair count was not cached after eviction")
 	}
 }
 
