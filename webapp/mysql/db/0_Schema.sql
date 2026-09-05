@@ -3,6 +3,8 @@ CREATE DATABASE isuumo;
 
 DROP TABLE IF EXISTS isuumo.estate;
 DROP TABLE IF EXISTS isuumo.chair;
+DROP TABLE IF EXISTS isuumo.estate_feature;
+DROP TABLE IF EXISTS isuumo.chair_feature;
 
 CREATE TABLE isuumo.estate
 (
@@ -20,9 +22,9 @@ CREATE TABLE isuumo.estate
     popularity  INTEGER             NOT NULL,
     INDEX idx_door_width_height (door_width, door_height),
     INDEX idx_door_height_width (door_height, door_width),
-    -- ORDER BY rent ASC, id ASC (getLowPricedEstate) をインデックスだけで解決しつつ、
-    -- rent の範囲条件 (searchEstates の SELECT/COUNT) の絞り込みにも使う
-    INDEX idx_rent_id (rent, id)
+    INDEX idx_rent_id (rent, id),
+    INDEX idx_estate_popularity_id (popularity, id),
+    INDEX idx_estate_latitude_longitude (latitude, longitude)
 );
 
 CREATE TABLE isuumo.chair
@@ -40,8 +42,28 @@ CREATE TABLE isuumo.chair
     kind        VARCHAR(64)     NOT NULL,
     popularity  INTEGER         NOT NULL,
     stock       INTEGER         NOT NULL,
-    -- ORDER BY price ASC, id ASC (getLowPricedChair) をインデックスだけで解決する
     INDEX idx_price_id (price, id),
-    -- price の範囲条件 + stock > 0 (searchChairs の SELECT/COUNT) の絞り込みに使う
-    INDEX idx_price_stock (price, stock)
+    INDEX idx_price_stock (price, stock),
+    INDEX idx_chair_height (height),
+    INDEX idx_chair_width (width),
+    INDEX idx_chair_depth (depth),
+    INDEX idx_chair_color_popularity_id (color, popularity, id),
+    INDEX idx_chair_kind_popularity_id (kind, popularity, id),
+    INDEX idx_chair_popularity_id (popularity, id)
+);
+
+CREATE TABLE isuumo.chair_feature
+(
+    chair_id     INTEGER     NOT NULL,
+    feature_value VARCHAR(64) NOT NULL,
+    PRIMARY KEY (chair_id, feature_value),
+    INDEX idx_chair_feature_value (feature_value, chair_id)
+);
+
+CREATE TABLE isuumo.estate_feature
+(
+    estate_id    INTEGER     NOT NULL,
+    feature_value VARCHAR(64) NOT NULL,
+    PRIMARY KEY (estate_id, feature_value),
+    INDEX idx_estate_feature_value (feature_value, estate_id)
 );

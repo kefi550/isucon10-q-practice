@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -278,7 +279,11 @@ func main() {
 		e.Logger.Fatalf("DB connection failed : %v", err)
 	}
 	db.SetMaxOpenConns(10)
-	defer db.Close()
+	defer func() {
+		if db != nil {
+			_ = db.Close()
+		}
+	}()
 
 	// Start server
 	serverPort := fmt.Sprintf(":%v", getEnv("SERVER_PORT", "1323"))
@@ -286,6 +291,10 @@ func main() {
 }
 
 func initialize(c echo.Context) error {
+	invalidateAllSearchCaches()
+	resetFeatureIndexState()
+	invalidatePreparedQueries()
+
 	sqlDir := filepath.Join("..", "mysql", "db")
 	paths := []string{
 		filepath.Join(sqlDir, "0_Schema.sql"),
@@ -309,6 +318,15 @@ func initialize(c echo.Context) error {
 		}
 	}
 
+	if err := reopenDBPool(); err != nil {
+		c.Logger().Errorf("failed to reopen DB pool after initialize: %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	if err := rebuildFeatureIndexes(); err != nil {
+		c.Logger().Errorf("failed to rebuild feature indexes: %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
 	return c.JSON(http.StatusOK, InitializeResponse{
 		Language: "go",
 	})
@@ -322,8 +340,11 @@ func getChairDetail(c echo.Context) error {
 	}
 
 	chair := Chair{}
-	query := `SELECT * FROM chair WHERE id = ?`
-	err = db.Get(&chair, query, id)
+	if queries := preparedQueriesOrNil(); queries != nil {
+		err = queries.chairDetail.Get(&chair, id)
+	} else {
+		err = db.Get(&chair, "SELECT "+chairDetailColumns+" FROM chair WHERE id = ?", id)
+	}
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.Echo().Logger.Infof("requested id's chair not found : %v", id)
@@ -378,11 +399,7 @@ func postChair(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	defer f.Close()
-	records, err := csv.NewReader(f).ReadAll()
-	if err != nil {
-		c.Logger().Errorf("failed to read csv: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
+	reader := csv.NewReader(f)
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -392,7 +409,19 @@ func postChair(c echo.Context) error {
 	defer tx.Rollback()
 	chairColumns := []string{"id", "name", "description", "thumbnail", "price", "height", "width", "depth", "color", "features", "kind", "popularity", "stock"}
 	chairBatch := make([][]interface{}, 0, insertBatchSize)
-	for _, row := range records {
+	chairFeatureIndexReady := isFeatureIndexReady("chair")
+	chairFeatureValues := uniqueFeatureValues(chairSearchCondition.Feature.List)
+	chairFeatureBatch := make([][]interface{}, 0, insertBatchSize)
+	for {
+		row, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			c.Logger().Errorf("failed to read csv: %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+
 		rm := RecordMapper{Record: row}
 		id := rm.NextInt()
 		name := rm.NextString()
@@ -412,6 +441,9 @@ func postChair(c echo.Context) error {
 			return c.NoContent(http.StatusBadRequest)
 		}
 		chairBatch = append(chairBatch, []interface{}{id, name, description, thumbnail, price, height, width, depth, color, features, kind, popularity, stock})
+		if chairFeatureIndexReady {
+			chairFeatureBatch = appendFeatureIndexRows(chairFeatureBatch, id, features, chairFeatureValues)
+		}
 		if len(chairBatch) < insertBatchSize {
 			continue
 		}
@@ -419,16 +451,30 @@ func postChair(c echo.Context) error {
 			c.Logger().Errorf("failed to insert chair: %v", err)
 			return c.NoContent(http.StatusInternalServerError)
 		}
+		if chairFeatureIndexReady {
+			if err := insertFeatureIndexBatch(tx, "chair", chairFeatureBatch); err != nil {
+				c.Logger().Errorf("failed to insert chair feature index: %v", err)
+				return c.NoContent(http.StatusInternalServerError)
+			}
+		}
 		chairBatch = chairBatch[:0]
+		chairFeatureBatch = chairFeatureBatch[:0]
 	}
 	if err := insertBatch(tx, "chair", chairColumns, chairBatch); err != nil {
 		c.Logger().Errorf("failed to insert chair: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	if chairFeatureIndexReady {
+		if err := insertFeatureIndexBatch(tx, "chair", chairFeatureBatch); err != nil {
+			c.Logger().Errorf("failed to insert chair feature index: %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		c.Logger().Errorf("failed to commit tx: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	invalidateChairSearchCache()
 	return c.NoContent(http.StatusCreated)
 }
 
@@ -514,9 +560,17 @@ func searchChairs(c echo.Context) error {
 		params = append(params, c.QueryParam("color"))
 	}
 
-	if c.QueryParam("features") != "" {
-		for _, f := range strings.Split(c.QueryParam("features"), ",") {
-			conditions = append(conditions, "features LIKE CONCAT('%', ?, '%')")
+	featureQuery := c.QueryParam("features")
+	useChairFeatureIndex := featureQuery != "" &&
+		hasConfiguredFeatureQuery(featureQuery, chairSearchCondition.Feature.List) &&
+		ensureChairFeatureIndex()
+	if featureQuery != "" {
+		for _, f := range strings.Split(featureQuery, ",") {
+			if useChairFeatureIndex && isConfiguredFeature(f, chairSearchCondition.Feature.List) {
+				conditions = append(conditions, "EXISTS (SELECT 1 FROM chair_feature AS cf WHERE cf.chair_id = chair.id AND cf.feature_value = ?)")
+			} else {
+				conditions = append(conditions, "features LIKE CONCAT('%', ?, '%')")
+			}
 			params = append(params, f)
 		}
 	}
@@ -540,10 +594,15 @@ func searchChairs(c echo.Context) error {
 		return c.NoContent(http.StatusBadRequest)
 	}
 
-	searchQuery := "SELECT * FROM chair WHERE "
-	countQuery := "SELECT COUNT(*) FROM chair WHERE "
+	searchQuery := "SELECT " + chairPublicColumns + " FROM chair AS chair WHERE "
+	countQuery := "SELECT COUNT(*) FROM chair AS chair WHERE "
 	searchCondition := strings.Join(conditions, " AND ")
 	limitOffset := " ORDER BY popularity DESC, id ASC LIMIT ? OFFSET ?"
+	cacheKey := c.Request().URL.RawQuery
+	cacheGeneration := searchCache.currentGeneration()
+	if cached, ok := searchCache.getChair(cacheKey); ok {
+		return c.JSON(http.StatusOK, cached)
+	}
 
 	var res ChairSearchResponse
 	err = db.Get(&res.Count, countQuery+searchCondition, params...)
@@ -564,6 +623,7 @@ func searchChairs(c echo.Context) error {
 	}
 
 	res.Chairs = chairs
+	searchCache.putChair(cacheKey, res, cacheGeneration)
 
 	return c.JSON(http.StatusOK, res)
 }
@@ -587,35 +647,28 @@ func buyChair(c echo.Context) error {
 		return c.NoContent(http.StatusBadRequest)
 	}
 
-	tx, err := db.Beginx()
-	if err != nil {
-		c.Echo().Logger.Errorf("failed to create transaction : %v", err)
-		return c.NoContent(http.StatusInternalServerError)
+	var result sql.Result
+	if queries := preparedQueriesOrNil(); queries != nil {
+		result, err = queries.buyChair.Exec(id)
+	} else {
+		result, err = db.Exec("UPDATE chair SET stock = stock - 1 WHERE id = ? AND stock > 0", id)
 	}
-	defer tx.Rollback()
-
-	var chair Chair
-	err = tx.QueryRowx("SELECT * FROM chair WHERE id = ? AND stock > 0 FOR UPDATE", id).StructScan(&chair)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			c.Echo().Logger.Infof("buyChair chair id \"%v\" not found", id)
-			return c.NoContent(http.StatusNotFound)
-		}
-		c.Echo().Logger.Errorf("DB Execution Error: on getting a chair by id : %v", err)
+		c.Echo().Logger.Errorf("chair stock update failed: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	_, err = tx.Exec("UPDATE chair SET stock = stock - 1 WHERE id = ?", id)
+	updated, err := result.RowsAffected()
 	if err != nil {
-		c.Echo().Logger.Errorf("chair stock update failed : %v", err)
+		c.Echo().Logger.Errorf("failed to inspect chair stock update: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
+	}
+	if updated == 0 {
+		c.Echo().Logger.Infof("buyChair chair id \"%v\" not found", id)
+		return c.NoContent(http.StatusNotFound)
 	}
 
-	err = tx.Commit()
-	if err != nil {
-		c.Echo().Logger.Errorf("transaction commit error : %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
+	invalidateChairSearchCache()
 
 	return c.NoContent(http.StatusOK)
 }
@@ -626,8 +679,12 @@ func getChairSearchCondition(c echo.Context) error {
 
 func getLowPricedChair(c echo.Context) error {
 	var chairs []Chair
-	query := `SELECT * FROM chair WHERE stock > 0 ORDER BY price ASC, id ASC LIMIT ?`
-	err := db.Select(&chairs, query, Limit)
+	var err error
+	if queries := preparedQueriesOrNil(); queries != nil {
+		err = queries.lowPricedChair.Select(&chairs, Limit)
+	} else {
+		err = db.Select(&chairs, "SELECT "+chairPublicColumns+" FROM chair WHERE stock > 0 ORDER BY price ASC, id ASC LIMIT ?", Limit)
+	}
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.Logger().Error("getLowPricedChair not found")
@@ -648,7 +705,11 @@ func getEstateDetail(c echo.Context) error {
 	}
 
 	var estate Estate
-	err = db.Get(&estate, "SELECT * FROM estate WHERE id = ?", id)
+	if queries := preparedQueriesOrNil(); queries != nil {
+		err = queries.estateDetail.Get(&estate, id)
+	} else {
+		err = db.Get(&estate, "SELECT "+estatePublicColumns+" FROM estate WHERE id = ?", id)
+	}
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.Echo().Logger.Infof("getEstateDetail estate id %v not found", id)
@@ -686,11 +747,7 @@ func postEstate(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	defer f.Close()
-	records, err := csv.NewReader(f).ReadAll()
-	if err != nil {
-		c.Logger().Errorf("failed to read csv: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
+	reader := csv.NewReader(f)
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -700,7 +757,19 @@ func postEstate(c echo.Context) error {
 	defer tx.Rollback()
 	estateColumns := []string{"id", "name", "description", "thumbnail", "address", "latitude", "longitude", "rent", "door_height", "door_width", "features", "popularity"}
 	estateBatch := make([][]interface{}, 0, insertBatchSize)
-	for _, row := range records {
+	estateFeatureIndexReady := isFeatureIndexReady("estate")
+	estateFeatureValues := uniqueFeatureValues(estateSearchCondition.Feature.List)
+	estateFeatureBatch := make([][]interface{}, 0, insertBatchSize)
+	for {
+		row, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			c.Logger().Errorf("failed to read csv: %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+
 		rm := RecordMapper{Record: row}
 		id := rm.NextInt()
 		name := rm.NextString()
@@ -719,6 +788,9 @@ func postEstate(c echo.Context) error {
 			return c.NoContent(http.StatusBadRequest)
 		}
 		estateBatch = append(estateBatch, []interface{}{id, name, description, thumbnail, address, latitude, longitude, rent, doorHeight, doorWidth, features, popularity})
+		if estateFeatureIndexReady {
+			estateFeatureBatch = appendFeatureIndexRows(estateFeatureBatch, id, features, estateFeatureValues)
+		}
 		if len(estateBatch) < insertBatchSize {
 			continue
 		}
@@ -726,16 +798,30 @@ func postEstate(c echo.Context) error {
 			c.Logger().Errorf("failed to insert estate: %v", err)
 			return c.NoContent(http.StatusInternalServerError)
 		}
+		if estateFeatureIndexReady {
+			if err := insertFeatureIndexBatch(tx, "estate", estateFeatureBatch); err != nil {
+				c.Logger().Errorf("failed to insert estate feature index: %v", err)
+				return c.NoContent(http.StatusInternalServerError)
+			}
+		}
 		estateBatch = estateBatch[:0]
+		estateFeatureBatch = estateFeatureBatch[:0]
 	}
 	if err := insertBatch(tx, "estate", estateColumns, estateBatch); err != nil {
 		c.Logger().Errorf("failed to insert estate: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	if estateFeatureIndexReady {
+		if err := insertFeatureIndexBatch(tx, "estate", estateFeatureBatch); err != nil {
+			c.Logger().Errorf("failed to insert estate feature index: %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		c.Logger().Errorf("failed to commit tx: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	invalidateEstateSearchCache()
 	return c.NoContent(http.StatusCreated)
 }
 
@@ -794,9 +880,17 @@ func searchEstates(c echo.Context) error {
 		}
 	}
 
-	if c.QueryParam("features") != "" {
-		for _, f := range strings.Split(c.QueryParam("features"), ",") {
-			conditions = append(conditions, "features like concat('%', ?, '%')")
+	featureQuery := c.QueryParam("features")
+	useEstateFeatureIndex := featureQuery != "" &&
+		hasConfiguredFeatureQuery(featureQuery, estateSearchCondition.Feature.List) &&
+		ensureEstateFeatureIndex()
+	if featureQuery != "" {
+		for _, f := range strings.Split(featureQuery, ",") {
+			if useEstateFeatureIndex && isConfiguredFeature(f, estateSearchCondition.Feature.List) {
+				conditions = append(conditions, "EXISTS (SELECT 1 FROM estate_feature AS ef WHERE ef.estate_id = estate.id AND ef.feature_value = ?)")
+			} else {
+				conditions = append(conditions, "features like concat('%', ?, '%')")
+			}
 			params = append(params, f)
 		}
 	}
@@ -818,10 +912,15 @@ func searchEstates(c echo.Context) error {
 		return c.NoContent(http.StatusBadRequest)
 	}
 
-	searchQuery := "SELECT * FROM estate WHERE "
-	countQuery := "SELECT COUNT(*) FROM estate WHERE "
+	searchQuery := "SELECT " + estatePublicColumns + " FROM estate AS estate WHERE "
+	countQuery := "SELECT COUNT(*) FROM estate AS estate WHERE "
 	searchCondition := strings.Join(conditions, " AND ")
 	limitOffset := " ORDER BY popularity DESC, id ASC LIMIT ? OFFSET ?"
+	cacheKey := c.Request().URL.RawQuery
+	cacheGeneration := searchCache.currentGeneration()
+	if cached, ok := searchCache.getEstate(cacheKey); ok {
+		return c.JSON(http.StatusOK, cached)
+	}
 
 	var res EstateSearchResponse
 	err = db.Get(&res.Count, countQuery+searchCondition, params...)
@@ -842,14 +941,19 @@ func searchEstates(c echo.Context) error {
 	}
 
 	res.Estates = estates
+	searchCache.putEstate(cacheKey, res, cacheGeneration)
 
 	return c.JSON(http.StatusOK, res)
 }
 
 func getLowPricedEstate(c echo.Context) error {
 	estates := make([]Estate, 0, Limit)
-	query := `SELECT * FROM estate ORDER BY rent ASC, id ASC LIMIT ?`
-	err := db.Select(&estates, query, Limit)
+	var err error
+	if queries := preparedQueriesOrNil(); queries != nil {
+		err = queries.lowPricedEstate.Select(&estates, Limit)
+	} else {
+		err = db.Select(&estates, "SELECT "+estatePublicColumns+" FROM estate ORDER BY rent ASC, id ASC LIMIT ?", Limit)
+	}
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.Logger().Error("getLowPricedEstate not found")
@@ -870,8 +974,11 @@ func searchRecommendedEstateWithChair(c echo.Context) error {
 	}
 
 	chair := Chair{}
-	query := `SELECT * FROM chair WHERE id = ?`
-	err = db.Get(&chair, query, id)
+	if queries := preparedQueriesOrNil(); queries != nil {
+		err = queries.recommendedChair.Get(&chair, id)
+	} else {
+		err = db.Get(&chair, "SELECT width, height, depth FROM chair WHERE id = ?", id)
+	}
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.Logger().Infof("Requested chair id \"%v\" not found", id)
@@ -888,8 +995,11 @@ func searchRecommendedEstateWithChair(c echo.Context) error {
 	sides := []int64{chair.Width, chair.Height, chair.Depth}
 	sort.Slice(sides, func(i, j int) bool { return sides[i] < sides[j] })
 	lo, mid := sides[0], sides[1]
-	query = `SELECT * FROM estate WHERE (door_width >= ? AND door_height >= ?) OR (door_width >= ? AND door_height >= ?) ORDER BY popularity DESC, id ASC LIMIT ?`
-	err = db.Select(&estates, query, lo, mid, mid, lo, Limit)
+	if queries := preparedQueriesOrNil(); queries != nil {
+		err = queries.recommendedEstate.Select(&estates, lo, mid, mid, lo, Limit)
+	} else {
+		err = db.Select(&estates, "SELECT "+estatePublicColumns+" FROM estate WHERE (door_width >= ? AND door_height >= ?) OR (door_width >= ? AND door_height >= ?) ORDER BY popularity DESC, id ASC LIMIT ?", lo, mid, mid, lo, Limit)
+	}
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return c.JSON(http.StatusOK, EstateListResponse{[]Estate{}})
@@ -915,8 +1025,13 @@ func searchEstateNazotte(c echo.Context) error {
 
 	b := coordinates.getBoundingBox()
 	estates := []Estate{}
-	query := fmt.Sprintf(`SELECT * FROM estate WHERE latitude <= ? AND latitude >= ? AND longitude <= ? AND longitude >= ? AND ST_Contains(ST_PolygonFromText(%s), Point(latitude, longitude)) ORDER BY popularity DESC, id ASC LIMIT ?`, coordinates.coordinatesToText())
-	err = db.Select(&estates, query, b.BottomRightCorner.Latitude, b.TopLeftCorner.Latitude, b.BottomRightCorner.Longitude, b.TopLeftCorner.Longitude, NazotteLimit)
+	polygonText := coordinates.coordinatesToText()
+	if queries := preparedQueriesOrNil(); queries != nil {
+		err = queries.nazotteEstate.Select(&estates, b.BottomRightCorner.Latitude, b.TopLeftCorner.Latitude, b.BottomRightCorner.Longitude, b.TopLeftCorner.Longitude, polygonText, NazotteLimit)
+	} else {
+		query := "SELECT " + estatePublicColumns + " FROM estate WHERE latitude <= ? AND latitude >= ? AND longitude <= ? AND longitude >= ? AND ST_Contains(ST_PolygonFromText(?), Point(latitude, longitude)) ORDER BY popularity DESC, id ASC LIMIT ?"
+		err = db.Select(&estates, query, b.BottomRightCorner.Latitude, b.TopLeftCorner.Latitude, b.BottomRightCorner.Longitude, b.TopLeftCorner.Longitude, polygonText, NazotteLimit)
+	}
 	if err == sql.ErrNoRows {
 		c.Echo().Logger.Infof("select * from estate where latitude ...", err)
 		return c.JSON(http.StatusOK, EstateSearchResponse{Count: 0, Estates: []Estate{}})
@@ -947,9 +1062,12 @@ func postEstateRequestDocument(c echo.Context) error {
 		return c.NoContent(http.StatusBadRequest)
 	}
 
-	estate := Estate{}
-	query := `SELECT * FROM estate WHERE id = ?`
-	err = db.Get(&estate, query, id)
+	var exists int
+	if queries := preparedQueriesOrNil(); queries != nil {
+		err = queries.estateExists.Get(&exists, id)
+	} else {
+		err = db.Get(&exists, "SELECT 1 FROM estate WHERE id = ? LIMIT 1", id)
+	}
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return c.NoContent(http.StatusNotFound)
@@ -998,5 +1116,5 @@ func (cs Coordinates) coordinatesToText() string {
 	for _, c := range cs.Coordinates {
 		points = append(points, fmt.Sprintf("%f %f", c.Latitude, c.Longitude))
 	}
-	return fmt.Sprintf("'POLYGON((%s))'", strings.Join(points, ","))
+	return fmt.Sprintf("POLYGON((%s))", strings.Join(points, ","))
 }
