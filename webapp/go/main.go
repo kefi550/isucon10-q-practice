@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -881,11 +882,14 @@ func searchRecommendedEstateWithChair(c echo.Context) error {
 	}
 
 	var estates []Estate
-	w := chair.Width
-	h := chair.Height
-	d := chair.Depth
-	query = `SELECT * FROM estate WHERE (door_width >= ? AND door_height >= ?) OR (door_width >= ? AND door_height >= ?) OR (door_width >= ? AND door_height >= ?) OR (door_width >= ? AND door_height >= ?) OR (door_width >= ? AND door_height >= ?) OR (door_width >= ? AND door_height >= ?) ORDER BY popularity DESC, id ASC LIMIT ?`
-	err = db.Select(&estates, query, w, h, w, d, h, w, h, d, d, w, d, h, Limit)
+	// 椅子がドアを通れるかどうかは、3辺のうち "最小の2辺" が door_width/door_height に
+	// (順不同で) 収まるかだけで判定できる。大きい辺を含む組み合わせは常によりきつい条件に
+	// なるため、6通りの順列を試す必要はなく、最小2辺による2パターンに帰着する。
+	sides := []int64{chair.Width, chair.Height, chair.Depth}
+	sort.Slice(sides, func(i, j int) bool { return sides[i] < sides[j] })
+	lo, mid := sides[0], sides[1]
+	query = `SELECT * FROM estate WHERE (door_width >= ? AND door_height >= ?) OR (door_width >= ? AND door_height >= ?) ORDER BY popularity DESC, id ASC LIMIT ?`
+	err = db.Select(&estates, query, lo, mid, mid, lo, Limit)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return c.JSON(http.StatusOK, EstateListResponse{[]Estate{}})
