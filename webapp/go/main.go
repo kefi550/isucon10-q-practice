@@ -338,6 +338,33 @@ func getChairDetail(c echo.Context) error {
 	return c.JSON(http.StatusOK, chair)
 }
 
+const insertBatchSize = 500
+
+func insertBatch(tx *sql.Tx, table string, columns []string, values [][]interface{}) error {
+	if len(values) == 0 {
+		return nil
+	}
+
+	placeholders := make([]string, len(columns))
+	for i := range placeholders {
+		placeholders[i] = "?"
+	}
+	rowPlaceholder := "(" + strings.Join(placeholders, ",") + ")"
+	valuePlaceholders := make([]string, len(values))
+	args := make([]interface{}, 0, len(values)*len(columns))
+	for i, value := range values {
+		if len(value) != len(columns) {
+			return fmt.Errorf("unexpected number of values for %s: got %d, want %d", table, len(value), len(columns))
+		}
+		valuePlaceholders[i] = rowPlaceholder
+		args = append(args, value...)
+	}
+
+	query := fmt.Sprintf("INSERT INTO %s(%s) VALUES %s", table, strings.Join(columns, ", "), strings.Join(valuePlaceholders, ","))
+	_, err := tx.Exec(query, args...)
+	return err
+}
+
 func postChair(c echo.Context) error {
 	header, err := c.FormFile("chairs")
 	if err != nil {
@@ -362,6 +389,8 @@ func postChair(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	defer tx.Rollback()
+	chairColumns := []string{"id", "name", "description", "thumbnail", "price", "height", "width", "depth", "color", "features", "kind", "popularity", "stock"}
+	chairBatch := make([][]interface{}, 0, insertBatchSize)
 	for _, row := range records {
 		rm := RecordMapper{Record: row}
 		id := rm.NextInt()
@@ -381,11 +410,19 @@ func postChair(c echo.Context) error {
 			c.Logger().Errorf("failed to read record: %v", err)
 			return c.NoContent(http.StatusBadRequest)
 		}
-		_, err := tx.Exec("INSERT INTO chair(id, name, description, thumbnail, price, height, width, depth, color, features, kind, popularity, stock) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", id, name, description, thumbnail, price, height, width, depth, color, features, kind, popularity, stock)
-		if err != nil {
+		chairBatch = append(chairBatch, []interface{}{id, name, description, thumbnail, price, height, width, depth, color, features, kind, popularity, stock})
+		if len(chairBatch) < insertBatchSize {
+			continue
+		}
+		if err := insertBatch(tx, "chair", chairColumns, chairBatch); err != nil {
 			c.Logger().Errorf("failed to insert chair: %v", err)
 			return c.NoContent(http.StatusInternalServerError)
 		}
+		chairBatch = chairBatch[:0]
+	}
+	if err := insertBatch(tx, "chair", chairColumns, chairBatch); err != nil {
+		c.Logger().Errorf("failed to insert chair: %v", err)
+		return c.NoContent(http.StatusInternalServerError)
 	}
 	if err := tx.Commit(); err != nil {
 		c.Logger().Errorf("failed to commit tx: %v", err)
@@ -660,6 +697,8 @@ func postEstate(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	defer tx.Rollback()
+	estateColumns := []string{"id", "name", "description", "thumbnail", "address", "latitude", "longitude", "rent", "door_height", "door_width", "features", "popularity"}
+	estateBatch := make([][]interface{}, 0, insertBatchSize)
 	for _, row := range records {
 		rm := RecordMapper{Record: row}
 		id := rm.NextInt()
@@ -678,11 +717,19 @@ func postEstate(c echo.Context) error {
 			c.Logger().Errorf("failed to read record: %v", err)
 			return c.NoContent(http.StatusBadRequest)
 		}
-		_, err := tx.Exec("INSERT INTO estate(id, name, description, thumbnail, address, latitude, longitude, rent, door_height, door_width, features, popularity) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", id, name, description, thumbnail, address, latitude, longitude, rent, doorHeight, doorWidth, features, popularity)
-		if err != nil {
+		estateBatch = append(estateBatch, []interface{}{id, name, description, thumbnail, address, latitude, longitude, rent, doorHeight, doorWidth, features, popularity})
+		if len(estateBatch) < insertBatchSize {
+			continue
+		}
+		if err := insertBatch(tx, "estate", estateColumns, estateBatch); err != nil {
 			c.Logger().Errorf("failed to insert estate: %v", err)
 			return c.NoContent(http.StatusInternalServerError)
 		}
+		estateBatch = estateBatch[:0]
+	}
+	if err := insertBatch(tx, "estate", estateColumns, estateBatch); err != nil {
+		c.Logger().Errorf("failed to insert estate: %v", err)
+		return c.NoContent(http.StatusInternalServerError)
 	}
 	if err := tx.Commit(); err != nil {
 		c.Logger().Errorf("failed to commit tx: %v", err)
