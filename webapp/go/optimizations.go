@@ -21,10 +21,11 @@ const (
 const maxSearchCacheEntries = 512
 
 type searchResponseCache struct {
-	mu         sync.RWMutex
-	chairs     map[string]ChairSearchResponse
-	estates    map[string]EstateSearchResponse
-	generation uint64
+	mu               sync.RWMutex
+	chairs           map[string]ChairSearchResponse
+	estates          map[string]EstateSearchResponse
+	chairGeneration  uint64
+	estateGeneration uint64
 }
 
 var searchCache = searchResponseCache{
@@ -52,16 +53,23 @@ func (cache *searchResponseCache) getChair(key string) (ChairSearchResponse, boo
 	return cloneChairSearchResponse(response), true
 }
 
-func (cache *searchResponseCache) currentGeneration() uint64 {
+func (cache *searchResponseCache) currentChairGeneration() uint64 {
 	cache.mu.RLock()
-	generation := cache.generation
+	generation := cache.chairGeneration
+	cache.mu.RUnlock()
+	return generation
+}
+
+func (cache *searchResponseCache) currentEstateGeneration() uint64 {
+	cache.mu.RLock()
+	generation := cache.estateGeneration
 	cache.mu.RUnlock()
 	return generation
 }
 
 func (cache *searchResponseCache) putChair(key string, response ChairSearchResponse, generation uint64) {
 	cache.mu.Lock()
-	if generation != cache.generation {
+	if generation != cache.chairGeneration {
 		cache.mu.Unlock()
 		return
 	}
@@ -84,7 +92,7 @@ func (cache *searchResponseCache) getEstate(key string) (EstateSearchResponse, b
 
 func (cache *searchResponseCache) putEstate(key string, response EstateSearchResponse, generation uint64) {
 	cache.mu.Lock()
-	if generation != cache.generation {
+	if generation != cache.estateGeneration {
 		cache.mu.Unlock()
 		return
 	}
@@ -98,14 +106,14 @@ func (cache *searchResponseCache) putEstate(key string, response EstateSearchRes
 func invalidateChairSearchCache() {
 	searchCache.mu.Lock()
 	searchCache.chairs = make(map[string]ChairSearchResponse)
-	searchCache.generation++
+	searchCache.chairGeneration++
 	searchCache.mu.Unlock()
 }
 
 func invalidateEstateSearchCache() {
 	searchCache.mu.Lock()
 	searchCache.estates = make(map[string]EstateSearchResponse)
-	searchCache.generation++
+	searchCache.estateGeneration++
 	searchCache.mu.Unlock()
 }
 
@@ -113,7 +121,8 @@ func invalidateAllSearchCaches() {
 	searchCache.mu.Lock()
 	searchCache.chairs = make(map[string]ChairSearchResponse)
 	searchCache.estates = make(map[string]EstateSearchResponse)
-	searchCache.generation++
+	searchCache.chairGeneration++
+	searchCache.estateGeneration++
 	searchCache.mu.Unlock()
 }
 

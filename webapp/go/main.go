@@ -629,7 +629,7 @@ func searchChairs(c echo.Context) error {
 	searchCondition := strings.Join(conditions, " AND ")
 	limitOffset := " ORDER BY popularity DESC, id ASC LIMIT ? OFFSET ?"
 	cacheKey := c.Request().URL.RawQuery
-	cacheGeneration := searchCache.currentGeneration()
+	cacheGeneration := searchCache.currentChairGeneration()
 	if cached, ok := searchCache.getChair(cacheKey); ok {
 		return c.JSON(http.StatusOK, cached)
 	}
@@ -947,7 +947,7 @@ func searchEstates(c echo.Context) error {
 	searchCondition := strings.Join(conditions, " AND ")
 	limitOffset := " ORDER BY popularity DESC, id ASC LIMIT ? OFFSET ?"
 	cacheKey := c.Request().URL.RawQuery
-	cacheGeneration := searchCache.currentGeneration()
+	cacheGeneration := searchCache.currentEstateGeneration()
 	if cached, ok := searchCache.getEstate(cacheKey); ok {
 		return c.JSON(http.StatusOK, cached)
 	}
