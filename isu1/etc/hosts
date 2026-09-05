@@ -1,6 +1,7 @@
 127.0.0.1 localhost
 
 10.0.3.195 isu2
+10.0.8.190 isu3
 
 # The following lines are desirable for IPv6 capable hosts
 ::1 ip6-localhost ip6-loopback

@@ -70,12 +70,12 @@ query_cache_size        = 16M
 #
 # Error log - should be very few entries.
 #
-log_error = /var/log/mysql/error.log
+#log_error = /var/log/mysql/error.log
 #
 # Here you can see queries with especially long duration
-slow_query_log         = 1
-slow_query_log_file    = /var/log/mysql/mysql-slow.log
-long_query_time = 0.01
+#slow_query_log         = 1
+#slow_query_log_file    = /var/log/mysql/mysql-slow.log
+#long_query_time = 0.01
 #log-queries-not-using-indexes
 #
 # The following can be used as easy to replay backup logs or for replication.
@@ -83,8 +83,8 @@ long_query_time = 0.01
 #       other settings you may need to change.
 #server-id              = 1
 #log_bin                        = /var/log/mysql/mysql-bin.log
-expire_logs_days        = 10
-max_binlog_size   = 100M
+#expire_logs_days        = 10
+#max_binlog_size   = 100M
 #binlog_do_db           = include_database_name
 #binlog_ignore_db       = include_database_name
 #
@@ -104,3 +104,5 @@ max_binlog_size   = 100M
 # ssl-cert=/etc/mysql/server-cert.pem
 # ssl-key=/etc/mysql/server-key.pem
 max_allowed_packet = 32505856
+
+innodb_buffer_pool_size = 1500M
