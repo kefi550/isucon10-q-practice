@@ -1144,12 +1144,13 @@ func searchEstateNazotte(c echo.Context) error {
 
 	b := coordinates.getBoundingBox()
 	estates := []Estate{}
+	bboxText := b.toPolygonText()
 	polygonText := coordinates.coordinatesToText()
 	if queries := estatePreparedQueriesOrNil(); queries != nil {
-		err = queries.nazotteEstate.Select(&estates, b.BottomRightCorner.Latitude, b.TopLeftCorner.Latitude, b.BottomRightCorner.Longitude, b.TopLeftCorner.Longitude, polygonText, NazotteLimit)
+		err = queries.nazotteEstate.Select(&estates, bboxText, polygonText, NazotteLimit)
 	} else {
-		query := "SELECT " + estatePublicColumns + " FROM estate FORCE INDEX (idx_estate_latitude_longitude) WHERE latitude <= ? AND latitude >= ? AND longitude <= ? AND longitude >= ? AND ST_Contains(ST_PolygonFromText(?), Point(latitude, longitude)) ORDER BY popularity_desc ASC, id ASC LIMIT ?"
-		err = estateDB.Select(&estates, query, b.BottomRightCorner.Latitude, b.TopLeftCorner.Latitude, b.BottomRightCorner.Longitude, b.TopLeftCorner.Longitude, polygonText, NazotteLimit)
+		query := "SELECT " + estatePublicColumns + " FROM estate FORCE INDEX (idx_estate_location) WHERE MBRContains(ST_GeomFromText(?), location) AND ST_Contains(ST_PolygonFromText(?), location) ORDER BY popularity_desc ASC, id ASC LIMIT ?"
+		err = estateDB.Select(&estates, query, bboxText, polygonText, NazotteLimit)
 	}
 	if err == sql.ErrNoRows {
 		c.Echo().Logger.Infof("select * from estate where latitude ...", err)
@@ -1233,6 +1234,20 @@ func (cs Coordinates) getBoundingBox() BoundingBox {
 		}
 	}
 	return boundingBox
+}
+
+// toPolygonText は bounding box を、estate.location (POINT) の SPATIAL INDEX を
+// MBRContains で使うための矩形ポリゴンのWKTに変換する。座標順は既存の
+// coordinatesToText / Point(latitude, longitude) と同じ "緯度 経度" にそろえる。
+func (b BoundingBox) toPolygonText() string {
+	return fmt.Sprintf(
+		"POLYGON((%f %f,%f %f,%f %f,%f %f,%f %f))",
+		b.TopLeftCorner.Latitude, b.TopLeftCorner.Longitude,
+		b.TopLeftCorner.Latitude, b.BottomRightCorner.Longitude,
+		b.BottomRightCorner.Latitude, b.BottomRightCorner.Longitude,
+		b.BottomRightCorner.Latitude, b.TopLeftCorner.Longitude,
+		b.TopLeftCorner.Latitude, b.TopLeftCorner.Longitude,
+	)
 }
 
 func (cs Coordinates) coordinatesToText() string {

@@ -988,7 +988,7 @@ func prepareEstateQuerySet() (*estatePreparedQuerySet, error) {
 		queries.close()
 		return nil, err
 	}
-	if err := prepare(&queries.nazotteEstate, "SELECT "+estatePublicColumns+" FROM estate FORCE INDEX (idx_estate_latitude_longitude) WHERE latitude <= ? AND latitude >= ? AND longitude <= ? AND longitude >= ? AND ST_Contains(ST_PolygonFromText(?), Point(latitude, longitude)) ORDER BY popularity_desc ASC, id ASC LIMIT ?"); err != nil {
+	if err := prepare(&queries.nazotteEstate, "SELECT "+estatePublicColumns+" FROM estate FORCE INDEX (idx_estate_location) WHERE MBRContains(ST_GeomFromText(?), location) AND ST_Contains(ST_PolygonFromText(?), location) ORDER BY popularity_desc ASC, id ASC LIMIT ?"); err != nil {
 		queries.close()
 		return nil, err
 	}

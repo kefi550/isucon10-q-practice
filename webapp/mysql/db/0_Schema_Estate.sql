@@ -28,6 +28,12 @@ CREATE TABLE isuumo.estate
         (CASE WHEN door_width < 80 THEN 0 WHEN door_width < 110 THEN 1 WHEN door_width < 150 THEN 2 ELSE 3 END) STORED,
     rent_range_id TINYINT GENERATED ALWAYS AS
         (CASE WHEN rent < 50000 THEN 0 WHEN rent < 100000 THEN 1 WHEN rent < 150000 THEN 2 ELSE 3 END) STORED,
+    -- nazotte 検索 (searchEstateNazotte) 用。緯度経度の bounding box を B-tree の
+    -- (latitude, longitude) 範囲スキャン + ICP で絞るより、R-tree の SPATIAL INDEX で
+    -- 2次元同時に絞り込む方が候補行数を減らせる。ST_Contains によるポリゴン厳密判定は
+    -- そのまま残し、この列は事前の bounding box 絞り込みにのみ使う。
+    location POINT GENERATED ALWAYS AS (Point(latitude, longitude)) STORED NOT NULL,
+    SPATIAL INDEX idx_estate_location (location),
     INDEX idx_door_width_height (door_width, door_height),
     INDEX idx_door_height_width (door_height, door_width),
     INDEX idx_rent_id (rent, id),
